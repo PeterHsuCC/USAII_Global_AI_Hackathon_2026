@@ -1,4 +1,9 @@
-import anthropic
+from typing import Any
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 from pydantic import BaseModel
 
 from ..conversation import ConversationWindow
@@ -61,10 +66,17 @@ def _format_transcript(window: ConversationWindow) -> str:
 
 
 class LLMSafetySignalExtractor:
-    def __init__(self, client: anthropic.Anthropic | None = None, model: str = DEFAULT_MODEL):
-        self.client = client or anthropic.Anthropic()
-        self.model = model
+    def __init__(self, client: Any | None = None, model: str = DEFAULT_MODEL):
+        if client is None:
+            if anthropic is None:
+                raise ImportError(
+                    "anthropic is required to use LLMSafetySignalExtractor. "
+                    "Install it with: pip install anthropic"
+                )
+            client = anthropic.Anthropic()
 
+        self.client = client
+        self.model = model
     def extract(self, window: ConversationWindow) -> LLMSafetySignals:
         response = self.client.messages.parse(
             model=self.model,
