@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from transformers import AutoModel, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
-from ..conversation import ConversationWindow
+from ...conversation import ConversationWindow
 
 DEFAULT_ENCODER_NAME = "bert-base-uncased"
 

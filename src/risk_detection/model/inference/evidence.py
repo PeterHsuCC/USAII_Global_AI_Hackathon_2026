@@ -2,9 +2,9 @@ from dataclasses import dataclass
 
 import torch
 
-from ..signals.rules import RuleEvidence
-from .emotion_mapping import DEFAULT_LAMBDA, map_emotions
-from .emotion_score_head import EmotionScoreHead
+from ...signals.rules import RuleEvidence
+from ..emotion.emotion_mapping import DEFAULT_LAMBDA, map_emotions
+from ..emotion.emotion_score_head import EmotionScoreHead
 
 DEFAULT_TOP_K = 3
 

@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from .aggregation import max_mean_top3
+from ..encoder.aggregation import max_mean_top3
 
 DEFAULT_NUM_CLASSES = 2
 NON_BULLYING_INDEX = 1

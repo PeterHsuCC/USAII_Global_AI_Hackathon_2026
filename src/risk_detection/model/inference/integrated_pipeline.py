@@ -2,27 +2,27 @@ from dataclasses import dataclass
 
 import torch
 
-from ..conversation import ConversationWindow
-from ..signals.emotional_dependency import EmotionalDependencyExtractor
-from ..signals.rule_score import rule_safety_score
-from ..signals.safety_features import SafetyFeatureExtractor
-from .aggregation import max_mean_top3
-from .conversation_encoder import ConversationEncoder
-from .cyberbullying_head import CyberbullyingHead
-from .early_detection_head import EarlyDetectionHead
-from .emotion_classifier import DEFAULT_GOEMOTIONS_MODEL, GoEmotionsClassifier
-from .emotion_mapping import DEFAULT_LAMBDA, map_emotions
-from .emotion_score_head import EmotionScoreHead
+from ...conversation import ConversationWindow
+from ...signals.emotional_dependency import EmotionalDependencyExtractor
+from ...signals.rule_score import rule_safety_score
+from ...signals.safety_features import SafetyFeatureExtractor
+from ..encoder.aggregation import max_mean_top3
+from ..encoder.conversation_encoder import ConversationEncoder
+from ..heads.cyberbullying_head import CyberbullyingHead
+from ..heads.early_detection_head import EarlyDetectionHead
+from ..emotion.emotion_classifier import DEFAULT_GOEMOTIONS_MODEL, GoEmotionsClassifier
+from ..emotion.emotion_mapping import DEFAULT_LAMBDA, map_emotions
+from ..emotion.emotion_score_head import EmotionScoreHead
 from .evidence import EvidenceBundle, extract_evidence
-from .grooming_head import GroomingHead
-from .historical_state import (
+from ..heads.grooming_head import GroomingHead
+from ..state.historical_state import (
     DEFAULT_PERSISTENCE_WINDOW,
     HistoricalRiskState,
     HistoricalStateUpdater,
     trend_label,
 )
-from .message_encoder import DEFAULT_ENCODER_NAME, MessageEncoder
-from .risk_fusion import RiskFusion
+from ..encoder.message_encoder import DEFAULT_ENCODER_NAME, MessageEncoder
+from ..fusion.risk_fusion import RiskFusion
 from .uncertainty import (
     DEFAULT_MC_DROPOUT_PASSES,
     UncertaintyEstimate,

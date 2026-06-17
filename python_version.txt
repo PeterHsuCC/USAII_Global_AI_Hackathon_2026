@@ -1,0 +1,5 @@
+兩個層面：
+
+這個 sandbox 環境裝的 Python：3.14.4（剛剛 python --version 跑出來的)
+專案宣告需要的最低版本：pyproject.toml 裡 requires-python = ">=3.10"——也就是程式碼寫的時候是用 3.10+ 的語法（例如 X | None 這種新式 type hint、match-free 但用了 list[float] 這種泛型內建型別標註),理論上 3.10、3.11、3.12、3.13、3.14 都能跑。
+你在自己環境裝套件、跑測試的時候，只要 Python 版本 ≥ 3.10 應該都沒問題，不一定要跟這邊的 3.14.4 一樣。
