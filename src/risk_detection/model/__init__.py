@@ -11,7 +11,10 @@ from .emotion_score_head import EmotionScoreHead
 from .grooming_head import BEHAVIOR_NAMES, GroomingHead
 from .grooming_pipeline import GroomingPipeline, GroomingResult
 from .historical_state import HistoricalRiskState, HistoricalStateUpdater, precursor_risk, trend_label
+from .losses import TASK_NAMES, behavior_loss, binary_review_loss, cyberbullying_loss, masked_multitask_loss
 from .message_encoder import MessageEncoder
+from .risk_fusion import FusedScores, OverallScoreFusion, RiskFusion, SafetyScoreFusion
+from .training_utils import freeze
 
 __all__ = [
     "max_mean_top3",
@@ -36,5 +39,15 @@ __all__ = [
     "HistoricalStateUpdater",
     "precursor_risk",
     "trend_label",
+    "TASK_NAMES",
+    "behavior_loss",
+    "binary_review_loss",
+    "cyberbullying_loss",
+    "masked_multitask_loss",
     "MessageEncoder",
+    "FusedScores",
+    "OverallScoreFusion",
+    "RiskFusion",
+    "SafetyScoreFusion",
+    "freeze",
 ]
