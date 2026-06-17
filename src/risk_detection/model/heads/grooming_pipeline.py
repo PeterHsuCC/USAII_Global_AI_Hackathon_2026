@@ -2,11 +2,11 @@ from dataclasses import dataclass
 
 import torch
 
-from ..conversation import ConversationWindow
-from ..signals.safety_features import SafetyFeatureExtractor, SafetyFeatures
-from .conversation_encoder import ConversationEncoder
+from ...conversation import ConversationWindow
+from ...signals.safety_features import SafetyFeatureExtractor, SafetyFeatures
+from ..encoder.conversation_encoder import ConversationEncoder
 from .grooming_head import GroomingHead
-from .message_encoder import MessageEncoder
+from ..encoder.message_encoder import MessageEncoder
 
 
 @dataclass

@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
-from ..conversation import ConversationWindow
+from ...conversation import ConversationWindow
 
 DEFAULT_GOEMOTIONS_MODEL = "SamLowe/roberta-base-go_emotions"
 NEUTRAL_LABEL = "neutral"

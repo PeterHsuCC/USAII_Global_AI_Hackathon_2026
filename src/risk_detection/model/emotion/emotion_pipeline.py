@@ -2,9 +2,9 @@ from dataclasses import dataclass
 
 import torch
 
-from ..conversation import ConversationWindow
-from ..signals.emotional_dependency import EmotionalDependencyExtractor
-from .aggregation import max_mean_top3
+from ...conversation import ConversationWindow
+from ...signals.emotional_dependency import EmotionalDependencyExtractor
+from ..encoder.aggregation import max_mean_top3
 from .emotion_classifier import GoEmotionsClassifier
 from .emotion_mapping import DEFAULT_LAMBDA, MAPPED_EMOTION_NAMES, map_emotions
 from .emotion_score_head import EmotionScoreHead

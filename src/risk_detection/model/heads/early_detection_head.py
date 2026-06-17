@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from .grooming_head import DEFAULT_SAFETY_DIM
-from .historical_state import STATE_DIM
+from ..state.historical_state import STATE_DIM
 
 
 class EarlyDetectionHead(nn.Module):

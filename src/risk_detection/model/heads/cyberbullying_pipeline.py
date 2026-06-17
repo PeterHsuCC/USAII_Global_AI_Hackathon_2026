@@ -2,10 +2,10 @@ from dataclasses import dataclass
 
 import torch
 
-from ..conversation import ConversationWindow
-from .conversation_encoder import ConversationEncoder
+from ...conversation import ConversationWindow
+from ..encoder.conversation_encoder import ConversationEncoder
 from .cyberbullying_head import CyberbullyingHead
-from .message_encoder import MessageEncoder
+from ..encoder.message_encoder import MessageEncoder
 
 
 @dataclass
