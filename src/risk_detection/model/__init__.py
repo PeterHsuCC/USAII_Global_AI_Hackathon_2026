@@ -21,6 +21,7 @@ from .evidence import (
 from .grooming_head import BEHAVIOR_NAMES, GroomingHead
 from .grooming_pipeline import GroomingPipeline, GroomingResult
 from .historical_state import HistoricalRiskState, HistoricalStateUpdater, precursor_risk, trend_label
+from .integrated_pipeline import IntegratedInferencePipeline, IntegratedInferenceResult, LIMITATIONS
 from .losses import TASK_NAMES, behavior_loss, binary_review_loss, cyberbullying_loss, masked_multitask_loss
 from .message_encoder import MessageEncoder
 from .risk_fusion import FusedScores, OverallScoreFusion, RiskFusion, SafetyScoreFusion
@@ -63,6 +64,9 @@ __all__ = [
     "HistoricalStateUpdater",
     "precursor_risk",
     "trend_label",
+    "IntegratedInferencePipeline",
+    "IntegratedInferenceResult",
+    "LIMITATIONS",
     "TASK_NAMES",
     "behavior_loss",
     "binary_review_loss",
