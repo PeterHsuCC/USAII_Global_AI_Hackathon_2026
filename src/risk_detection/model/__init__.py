@@ -4,7 +4,7 @@ from .cyberbullying_head import CyberbullyingHead
 from .cyberbullying_pipeline import CyberbullyingPipeline, CyberbullyingResult
 from .grooming_head import BEHAVIOR_NAMES, GroomingHead
 from .grooming_pipeline import GroomingPipeline, GroomingResult
-from .historical_state import HistoricalRiskState
+from .historical_state import HistoricalRiskState, HistoricalStateUpdater, precursor_risk, trend_label
 from .message_encoder import MessageEncoder
 
 __all__ = [
@@ -18,5 +18,8 @@ __all__ = [
     "GroomingPipeline",
     "GroomingResult",
     "HistoricalRiskState",
+    "HistoricalStateUpdater",
+    "precursor_risk",
+    "trend_label",
     "MessageEncoder",
 ]
