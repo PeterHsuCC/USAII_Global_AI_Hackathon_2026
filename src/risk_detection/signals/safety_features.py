@@ -18,6 +18,28 @@ class SafetyFeatures:
     def to_vector(self) -> list[float]:
         return self.llm_signals.to_vector() + self.rule_signals.to_vector()
 
+    @classmethod
+    def zero(cls) -> "SafetyFeatures":
+        """All-zero F_t^safe, e.g. for an empty Conversation Window where
+        there is nothing to extract signals from."""
+        return cls(
+            llm_signals=LLMSafetySignals(
+                secrecy=0.0,
+                isolation=0.0,
+                dependency=0.0,
+                sexual_escalation=0.0,
+                threat=0.0,
+                coercion=0.0,
+            ),
+            rule_signals=RuleSignals(
+                secret_request=False,
+                contact_migration=False,
+                age_reference=False,
+                image_request=False,
+                threat_phrase=False,
+            ),
+        )
+
 
 class SafetyFeatureExtractor:
     def __init__(
