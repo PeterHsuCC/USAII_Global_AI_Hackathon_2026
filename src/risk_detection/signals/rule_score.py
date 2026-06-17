@@ -1,12 +1,4 @@
-from .rules import RuleSignals
-
-RULE_SIGNAL_NAMES = (
-    "secret_request",
-    "contact_migration",
-    "age_reference",
-    "image_request",
-    "threat_phrase",
-)
+from .rules import RULE_SIGNAL_NAMES, RuleSignals
 
 
 def rule_safety_score(

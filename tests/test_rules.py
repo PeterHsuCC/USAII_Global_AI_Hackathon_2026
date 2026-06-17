@@ -55,3 +55,38 @@ def test_detects_threat_phrase():
     signals = RuleSignalExtractor().extract(window)
 
     assert signals.threat_phrase is True
+
+
+def test_evidence_records_every_triggering_message_for_a_rule():
+    window = _window(
+        "send me a pic",  # index 0: image_request
+        "no thanks",  # index 1: nothing
+        "come on just send a picture",  # index 2: image_request again
+    )
+
+    evidence = RuleSignalExtractor().extract_evidence(window)
+
+    assert evidence.triggered_message_indices["image_request"] == [0, 2]
+    assert evidence.triggered_message_indices["secret_request"] == []
+
+
+def test_evidence_union_indices_combines_multiple_rules():
+    window = _window(
+        "our little secret ok?",  # index 0: secret_request
+        "add me on snapchat",  # index 1: contact_migration
+        "totally unrelated message",  # index 2: nothing
+    )
+
+    evidence = RuleSignalExtractor().extract_evidence(window)
+
+    assert evidence.union_indices() == [0, 1]
+
+
+def test_extract_is_consistent_with_extract_evidence():
+    window = _window("our little secret ok?", "ok i promise")
+    extractor = RuleSignalExtractor()
+
+    signals = extractor.extract(window)
+    evidence = extractor.extract_evidence(window)
+
+    assert signals.secret_request == bool(evidence.triggered_message_indices["secret_request"])
