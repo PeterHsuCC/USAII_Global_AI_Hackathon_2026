@@ -3,6 +3,14 @@ from dataclasses import dataclass
 
 from ..conversation import ConversationWindow
 
+RULE_SIGNAL_NAMES = (
+    "secret_request",
+    "contact_migration",
+    "age_reference",
+    "image_request",
+    "threat_phrase",
+)
+
 _SECRET_REQUEST = re.compile(
     r"\b(don'?t tell|do not tell|keep (this|it) (a )?secret|just between us|our little secret)\b",
     re.IGNORECASE,
@@ -26,6 +34,14 @@ _THREAT_PHRASE = re.compile(
     re.IGNORECASE,
 )
 
+_PATTERNS = {
+    "secret_request": _SECRET_REQUEST,
+    "contact_migration": _CONTACT_MIGRATION,
+    "age_reference": _AGE_REFERENCE,
+    "image_request": _IMAGE_REQUEST,
+    "threat_phrase": _THREAT_PHRASE,
+}
+
 
 @dataclass
 class RuleSignals:
@@ -48,13 +64,42 @@ class RuleSignals:
         ]
 
 
+@dataclass
+class RuleEvidence:
+    """Per-rule triggered message indices within a Conversation Window,
+    keyed by rule name (RULE_SIGNAL_NAMES). A rule may fire across multiple
+    messages -- every triggering message is kept, not just the first
+    (Section 14: "if rule j = image request is detected in messages 3 and
+    9, both IDs are recorded")."""
+
+    triggered_message_indices: dict[str, list[int]]
+
+    def union_indices(self) -> list[int]:
+        """E_t^rule = union over active rules j of TriggeredMessageIDs(j),
+        sorted ascending (Section 14)."""
+        indices: set[int] = set()
+        for message_ids in self.triggered_message_indices.values():
+            indices.update(message_ids)
+        return sorted(indices)
+
+
 class RuleSignalExtractor:
+    def extract_evidence(self, window: ConversationWindow) -> RuleEvidence:
+        """Per-message rule matches -- the basis for both the window-level
+        RuleSignals (extract()) and Section 14's rule evidence."""
+        triggered: dict[str, list[int]] = {name: [] for name in RULE_SIGNAL_NAMES}
+        for i, message in enumerate(window):
+            for name, pattern in _PATTERNS.items():
+                if pattern.search(message.text):
+                    triggered[name].append(i)
+        return RuleEvidence(triggered_message_indices=triggered)
+
     def extract(self, window: ConversationWindow) -> RuleSignals:
-        text = " ".join(m.text for m in window)
+        triggered = self.extract_evidence(window).triggered_message_indices
         return RuleSignals(
-            secret_request=bool(_SECRET_REQUEST.search(text)),
-            contact_migration=bool(_CONTACT_MIGRATION.search(text)),
-            age_reference=bool(_AGE_REFERENCE.search(text)),
-            image_request=bool(_IMAGE_REQUEST.search(text)),
-            threat_phrase=bool(_THREAT_PHRASE.search(text)),
+            secret_request=bool(triggered["secret_request"]),
+            contact_migration=bool(triggered["contact_migration"]),
+            age_reference=bool(triggered["age_reference"]),
+            image_request=bool(triggered["image_request"]),
+            threat_phrase=bool(triggered["threat_phrase"]),
         )

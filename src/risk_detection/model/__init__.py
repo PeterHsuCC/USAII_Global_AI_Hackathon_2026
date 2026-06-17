@@ -8,6 +8,16 @@ from .emotion_classifier import GoEmotionsClassifier
 from .emotion_mapping import MAPPED_EMOTION_NAMES, map_emotions
 from .emotion_pipeline import EmotionPipeline, EmotionResult
 from .emotion_score_head import EmotionScoreHead
+from .evidence import (
+    EvidenceBundle,
+    attention_evidence,
+    cyberbullying_evidence,
+    emotion_evidence,
+    extract_evidence,
+    per_message_emotion_scores,
+    rule_evidence,
+    top_k_indices,
+)
 from .grooming_head import BEHAVIOR_NAMES, GroomingHead
 from .grooming_pipeline import GroomingPipeline, GroomingResult
 from .historical_state import HistoricalRiskState, HistoricalStateUpdater, precursor_risk, trend_label
@@ -15,6 +25,12 @@ from .losses import TASK_NAMES, behavior_loss, binary_review_loss, cyberbullying
 from .message_encoder import MessageEncoder
 from .risk_fusion import FusedScores, OverallScoreFusion, RiskFusion, SafetyScoreFusion
 from .training_utils import freeze
+from .uncertainty import (
+    UncertaintyEstimate,
+    enable_mc_dropout,
+    human_review_required,
+    mc_dropout_stats,
+)
 
 __all__ = [
     "max_mean_top3",
@@ -32,6 +48,14 @@ __all__ = [
     "EmotionPipeline",
     "EmotionResult",
     "EmotionScoreHead",
+    "EvidenceBundle",
+    "attention_evidence",
+    "cyberbullying_evidence",
+    "emotion_evidence",
+    "extract_evidence",
+    "per_message_emotion_scores",
+    "rule_evidence",
+    "top_k_indices",
     "GroomingHead",
     "GroomingPipeline",
     "GroomingResult",
@@ -50,4 +74,8 @@ __all__ = [
     "RiskFusion",
     "SafetyScoreFusion",
     "freeze",
+    "UncertaintyEstimate",
+    "enable_mc_dropout",
+    "human_review_required",
+    "mc_dropout_stats",
 ]
