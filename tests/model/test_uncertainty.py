@@ -3,6 +3,7 @@ import torch
 from torch import nn
 
 from risk_detection.model import (
+    currently_operable_review,
     enable_mc_dropout,
     human_review_required,
     mc_dropout_stats,
@@ -94,3 +95,39 @@ def test_human_review_required(r_hat, confidence, s_r_tilde, expected):
     decision = human_review_required(r_hat=r_hat, confidence=confidence, s_r_tilde=s_r_tilde)
 
     assert bool(decision.item()) is expected
+
+
+def test_human_review_required_threat_phrase_override():
+    # All other signals comfortably below threshold -- only the single
+    # severe rule should force review.
+    decision = human_review_required(
+        r_hat=0.1, confidence=0.9, s_r_tilde=0.2, q_threat_phrase=True
+    )
+    assert bool(decision.item()) is True
+
+
+def test_human_review_required_defaults_threat_phrase_to_false():
+    decision = human_review_required(r_hat=0.1, confidence=0.9, s_r_tilde=0.2)
+    assert bool(decision.item()) is False
+
+
+@pytest.mark.parametrize(
+    "s_r_tilde, q_threat_phrase, expected",
+    [
+        (0.8, False, True),  # rule score at threshold
+        (0.2, True, True),  # single severe rule alone
+        (0.2, False, False),  # neither condition met
+        (0.79, False, False),  # just below the non-inclusive boundary
+    ],
+)
+def test_currently_operable_review(s_r_tilde, q_threat_phrase, expected):
+    decision = currently_operable_review(s_r_tilde=s_r_tilde, q_threat_phrase=q_threat_phrase)
+    assert bool(decision.item()) is expected
+
+
+def test_currently_operable_review_ignores_score_and_confidence():
+    # Demonstrates the Section 19.5 point directly: a sky-high R_hat_t (if
+    # it were passed in, which this function doesn't even accept) cannot
+    # influence this decision -- only the rule-based terms can.
+    decision = currently_operable_review(s_r_tilde=0.0, q_threat_phrase=False)
+    assert bool(decision.item()) is False

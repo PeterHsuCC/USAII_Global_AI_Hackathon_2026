@@ -71,12 +71,23 @@ def human_review_required(
     r_hat: torch.Tensor | float,
     confidence: torch.Tensor | float,
     s_r_tilde: torch.Tensor | float,
+    q_threat_phrase: torch.Tensor | bool = False,
     r_threshold: float = DEFAULT_R_THRESHOLD,
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     rule_threshold: float = DEFAULT_RULE_THRESHOLD,
 ) -> torch.Tensor:
     """Review_t = 1(R_hat_t > 0.7) v 1(confidence_t < 0.6) v
-    1(S~_r(t) >= 0.8) (Section 13).
+    1(S~_r(t) >= 0.8) v 1(Q_threat_phrase = 1) (Section 13).
+
+    The Q_threat_phrase term is a direct single-rule override: under
+    uniform rule weights (Section 10.1), S~_r(t) >= 0.8 alone requires 4
+    of 5 rules to co-occur, too strict a bar for a single severe signal
+    like an explicit threat phrase to trigger review on its own.
+
+    This is the full target condition -- R_hat_t and confidence depend on
+    the Overall Score, which in turn depends on the Grooming Head,
+    EmotionScoreHead, and RiskFusion (Section 19.5); see
+    `currently_operable_review` for the subset that doesn't.
 
     Thresholds are prototype settings; tune with validation data and
     operational review capacity. Returns a boolean tensor (call .item()
@@ -85,4 +96,30 @@ def human_review_required(
     r_hat = torch.as_tensor(r_hat)
     confidence = torch.as_tensor(confidence)
     s_r_tilde = torch.as_tensor(s_r_tilde)
-    return (r_hat > r_threshold) | (confidence < confidence_threshold) | (s_r_tilde >= rule_threshold)
+    q_threat_phrase = torch.as_tensor(q_threat_phrase, dtype=torch.bool)
+    return (
+        (r_hat > r_threshold)
+        | (confidence < confidence_threshold)
+        | (s_r_tilde >= rule_threshold)
+        | q_threat_phrase
+    )
+
+
+def currently_operable_review(
+    s_r_tilde: torch.Tensor | float,
+    q_threat_phrase: torch.Tensor | bool = False,
+    rule_threshold: float = DEFAULT_RULE_THRESHOLD,
+) -> torch.Tensor:
+    """Review_t (currently operable) = 1(S~_r(t) >= 0.8) v
+    1(Q_threat_phrase = 1) (Section 13, Section 19.5).
+
+    The only portion of `human_review_required` that is meaningful for
+    operational routing today: the rule-based terms have no learned
+    weights to wait on. R_hat_t, confidence, and Warning_t (Section 9.1)
+    all trace back to the untrained Grooming Head, EmotionScoreHead, and
+    RiskFusion, so they are deliberately excluded here rather than mixed
+    in with noise from framework-initialized weights.
+    """
+    s_r_tilde = torch.as_tensor(s_r_tilde)
+    q_threat_phrase = torch.as_tensor(q_threat_phrase, dtype=torch.bool)
+    return (s_r_tilde >= rule_threshold) | q_threat_phrase
