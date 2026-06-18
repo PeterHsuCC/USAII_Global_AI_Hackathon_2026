@@ -74,6 +74,26 @@ def test_emotion_evidence_picks_highest_scoring_messages():
     assert all(0 <= i < 5 for i in indices)
 
 
+def test_emotion_evidence_ranks_by_raw_mapped_dimensions_not_untrained_head():
+    # EmotionScoreHead's weights are framework-initialized noise (Section
+    # 19.5): emotion_evidence must rank by the raw M_i dimensions
+    # regardless of what that untrained head would have scored, so a
+    # message with overwhelmingly high fear/sadness/anger should always
+    # win even against a head with arbitrary (here, negated) weights.
+    head = EmotionScoreHead()
+    with torch.no_grad():
+        head.linear.weight.fill_(-1.0)
+        head.linear.bias.fill_(0.0)
+
+    g_i = torch.zeros(3, 7)
+    g_i[1, _LABEL_TO_INDEX["fear"]] = 0.95
+    g_i[1, _LABEL_TO_INDEX["sadness"]] = 0.9
+
+    indices = emotion_evidence(g_i, _LABEL_TO_INDEX, d_t=0.0, emotion_score_head=head, k=1)
+
+    assert indices == [1]
+
+
 def test_extract_evidence_bundle_matches_each_component():
     head = EmotionScoreHead()
     per_message_risk = torch.tensor([0.1, 0.9, 0.3])

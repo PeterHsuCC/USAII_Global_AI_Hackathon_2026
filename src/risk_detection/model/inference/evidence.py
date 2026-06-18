@@ -65,9 +65,19 @@ def emotion_evidence(
     lam: float = DEFAULT_LAMBDA,
     k: int = DEFAULT_TOP_K,
 ) -> list[int]:
-    """E_t^emo = TopKIndices({S_emotion,i}, k)."""
-    scores = per_message_emotion_scores(per_message_emotions, label_to_index, d_t, emotion_score_head, lam=lam)
-    return top_k_indices(scores, k)
+    """E_t^emo = TopKIndices({S_emotion,i}, k) is the full target ranking
+    (Section 14), but EmotionScoreHead is not yet trained -- its
+    sigmoid(b_m + theta^T M_i) is a framework-initialized placeholder, not
+    a calibrated estimate (Section 19.5). Until it is trained, rank by the
+    raw mapped per-message dimensions M_i instead (max across
+    Fear/Sadness/Anger/Distress/Dependency), which needs no learned
+    weights. `emotion_score_head` is still accepted so this function's
+    signature won't need to change once training lands -- swap the line
+    below for `per_message_emotion_scores(...)` at that point.
+    """
+    m_i = map_emotions(per_message_emotions, label_to_index, d_t, lam=lam)
+    intensity = m_i.max(dim=-1).values
+    return top_k_indices(intensity, k)
 
 
 @dataclass

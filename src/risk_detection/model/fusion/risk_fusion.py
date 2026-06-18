@@ -50,11 +50,61 @@ class OverallScoreFusion(nn.Module):
         return torch.sigmoid(self.linear(features)).squeeze(-1)
 
 
+class PrototypeSafetyScoreFusion(nn.Module):
+    """Prototype Safety Score: sigmoid(b_s + v_cb*S_cb + v_g*S_g + v_r*S~_r)
+    (Section 11), omitting S_e and S_g*S_e.
+
+    The full SafetyScoreFusion above requires S_e, but the Early Detection
+    Head is not yet trained (Section 9.1/19.5) -- feeding its
+    framework-initialized output into a calibration-bound linear layer
+    would mix a real signal with noise. Use this 3-feature variant until
+    S_e is trained, at which point SafetyScoreFusion is the target.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(3, 1)  # order: [S_cb, S_g, S~_r]
+
+    def forward(
+        self,
+        s_cb: torch.Tensor,
+        s_g: torch.Tensor,
+        s_r_tilde: torch.Tensor,
+    ) -> torch.Tensor:
+        """All inputs are (...,) scalars (one score per window). Returns
+        the prototype S_safety(t) in [0,1], shape (...,)."""
+        features = torch.stack([s_cb, s_g, s_r_tilde], dim=-1)
+        return torch.sigmoid(self.linear(features)).squeeze(-1)
+
+
 @dataclass
 class FusedScores:
     safety_score: torch.Tensor  # S_safety(t)
     emotion_score: torch.Tensor  # S_emotion(t) = S_m(t)
     overall_score: torch.Tensor  # R_t
+
+
+class PrototypeRiskFusion(nn.Module):
+    """Two-stage fusion using the prototype Safety Score (no S_e). Same
+    Stage 2 (OverallScoreFusion) as the full RiskFusion -- only Stage 1
+    changes. This is the variant `IntegratedInferencePipeline` should use
+    until the Early Detection Head is trained (Section 19.5)."""
+
+    def __init__(self):
+        super().__init__()
+        self.safety_fusion = PrototypeSafetyScoreFusion()
+        self.overall_fusion = OverallScoreFusion()
+
+    def forward(
+        self,
+        s_cb: torch.Tensor,
+        s_g: torch.Tensor,
+        s_r_tilde: torch.Tensor,
+        s_emotion: torch.Tensor,
+    ) -> FusedScores:
+        s_safety = self.safety_fusion(s_cb, s_g, s_r_tilde)
+        r_t = self.overall_fusion(s_safety, s_emotion)
+        return FusedScores(safety_score=s_safety, emotion_score=s_emotion, overall_score=r_t)
 
 
 class RiskFusion(nn.Module):
