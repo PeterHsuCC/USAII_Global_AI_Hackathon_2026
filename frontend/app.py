@@ -1,3 +1,12 @@
+"""Streamlit frontend for the USAII Hybrid Conversation Risk Detection prototype.
+
+This file intentionally changes only the frontend layer. It can run without the
+real backend connected, and it can optionally call IntegratedInferencePipeline
+once the model dependencies / checkpoints are available.
+"""
+
+from __future__ import annotations
+
 import re
 import sys
 from pathlib import Path
@@ -12,15 +21,7 @@ import streamlit as st
 # ============================================================
 
 CURRENT_FILE = Path(__file__).resolve()
-
-# If this file is frontend/app.py, project root is one level above frontend.
-# If you put app.py directly in the root, this still works.
-PROJECT_ROOT = (
-    CURRENT_FILE.parent.parent
-    if CURRENT_FILE.parent.name == "frontend"
-    else CURRENT_FILE.parent
-)
-
+PROJECT_ROOT = CURRENT_FILE.parent.parent if CURRENT_FILE.parent.name == "frontend" else CURRENT_FILE.parent
 SRC_DIR = PROJECT_ROOT / "src"
 
 if SRC_DIR.exists() and str(SRC_DIR) not in sys.path:
@@ -28,7 +29,7 @@ if SRC_DIR.exists() and str(SRC_DIR) not in sys.path:
 
 
 # ============================================================
-# 1. Streamlit page config
+# 1. Page config
 # ============================================================
 
 st.set_page_config(
@@ -39,19 +40,31 @@ st.set_page_config(
 
 
 # ============================================================
-# 2. Small utility functions
+# 2. Constants that match report v15
 # ============================================================
 
+INPUT_MODE_CONVERSATION = "Conversation"
+INPUT_MODE_SINGLE_TEXT = "Single Text / Letter"
+
+MAPPED_EMOTION_NAMES = ["fear", "sadness", "anger", "distress", "dependency"]
+COMPONENT_SCORE_NAMES = ["cyberbullying", "grooming", "rule_score"]
+EVIDENCE_TYPES = ["cyberbullying", "conversation", "rule", "emotion"]
+
+FRONTEND_ONLY_STATUS = "frontend_only_placeholder"
+BACKEND_STATUS = "illustrative_unvalidated_example"
+
+
+# ============================================================
+# 3. Conversion helpers
+# ============================================================
+
+
 def tensor_to_float(value: Any) -> float | None:
-    """
-    Converts torch tensor / numpy value / Python number into float.
-    Returns None if the value is missing.
-    """
+    """Convert torch/numpy/Python scalar values into float for the UI."""
     if value is None:
         return None
 
     try:
-        # torch.Tensor
         if hasattr(value, "detach"):
             value = value.detach().cpu()
 
@@ -63,10 +76,8 @@ def tensor_to_float(value: Any) -> float | None:
         return None
 
 
-def tensor_to_list(value: Any) -> list[float]:
-    """
-    Converts torch tensor / numpy array / list into Python list of floats.
-    """
+def tensor_to_flat_list(value: Any) -> list[float]:
+    """Convert tensor/numpy/list values into a flat Python float list."""
     if value is None:
         return []
 
@@ -75,68 +86,109 @@ def tensor_to_list(value: Any) -> list[float]:
             value = value.detach().cpu()
 
         if hasattr(value, "tolist"):
-            raw = value.tolist()
-        else:
-            raw = list(value)
-
-        if isinstance(raw, (int, float)):
-            return [float(raw)]
-
-        return [float(x) for x in raw]
+            value = value.tolist()
     except Exception:
         return []
 
+    def _flatten(x: Any) -> list[Any]:
+        if isinstance(x, (list, tuple)):
+            out: list[Any] = []
+            for item in x:
+                out.extend(_flatten(item))
+            return out
+        return [x]
+
+    values: list[float] = []
+
+    for item in _flatten(value):
+        try:
+            values.append(float(item))
+        except Exception:
+            pass
+
+    return values
+
 
 def display_score(value: float | None) -> str:
-    """
-    Shows scores nicely in metric cards.
-    """
     if value is None:
         return "N/A"
     return f"{value:.2f}"
 
 
-def risk_level(overall_risk: float | None) -> str:
-    """
-    Simple frontend display label.
-    The final thresholds should be tuned later with validation data.
-    """
+def frontend_risk_level(overall_risk: float | None) -> str:
+    """Readable bucket used only when backend dashboard output is unavailable."""
     if overall_risk is None:
-        return "Pending"
+        return "pending"
 
     if overall_risk >= 0.70:
-        return "High"
+        return "high"
+
     if overall_risk >= 0.40:
-        return "Medium"
-    return "Low"
+        return "medium"
+
+    return "low"
+
+
+def coerce_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
+        return value
+
+    try:
+        if hasattr(value, "item"):
+            return bool(value.item())
+
+        return bool(value)
+    except Exception:
+        return None
+
+
+def one_index_evidence(evidence: dict[str, Any] | None) -> dict[str, list[int]]:
+    """Backend evidence indices are zero-based; the UI displays Message 1, 2, ..."""
+    output: dict[str, list[int]] = {name: [] for name in EVIDENCE_TYPES}
+
+    if not evidence:
+        return output
+
+    for name in EVIDENCE_TYPES:
+        raw_items = evidence.get(name, []) if isinstance(evidence, dict) else []
+        converted: list[int] = []
+
+        for item in raw_items or []:
+            try:
+                converted.append(int(item) + 1)
+            except Exception:
+                pass
+
+        output[name] = sorted(set(converted))
+
+    return output
+
+
+# ============================================================
+# 4. Input parsing
+# ============================================================
 
 
 def parse_messages(text: str, input_mode: str) -> list[dict[str, Any]]:
-    """
-    Converts raw text into a list of messages.
-
-    Conversation mode:
-        UserA: hello
-        UserB: hi
-
-    Single Text / Letter mode:
-        The whole input becomes one message.
-    """
+    """Turn either a multi-turn conversation or one single text into messages."""
     text = text.strip()
 
     if not text:
         return []
 
-    if input_mode == "Single Text / Letter":
+    if input_mode == INPUT_MODE_SINGLE_TEXT:
         return [
             {
-                "speaker": "unknown",
+                "speaker": "single_text",
                 "text": text,
                 "relative_time": 0.0,
             }
         ]
 
-    messages = []
+    messages: list[dict[str, Any]] = []
 
     for idx, line in enumerate(text.splitlines()):
         line = line.strip()
@@ -144,10 +196,7 @@ def parse_messages(text: str, input_mode: str) -> list[dict[str, Any]]:
         if not line:
             continue
 
-        # Supports:
-        # UserA: message
-        # UserA：message
-        match = re.match(r"^([^:：]{1,40})[:：]\s*(.+)$", line)
+        match = re.match(r"^([^:：]{1,60})[:：]\s*(.+)$", line)
 
         if match:
             speaker = match.group(1).strip()
@@ -168,17 +217,7 @@ def parse_messages(text: str, input_mode: str) -> list[dict[str, Any]]:
 
 
 def build_conversation_window(messages: list[dict[str, Any]], window_size: int):
-    """
-    Builds the project's ConversationWindow object.
-
-    This function is already written to match your project folder:
-
-        src/risk_detection/conversation.py
-
-    It expects:
-        ConversationWindow(k=...)
-        Message(speaker_id=..., text=..., relative_time=...)
-    """
+    """Build the project's ConversationWindow without changing backend code."""
     from risk_detection.conversation import ConversationWindow, Message
 
     window = ConversationWindow(k=window_size)
@@ -196,274 +235,237 @@ def build_conversation_window(messages: list[dict[str, Any]], window_size: int):
 
 
 # ============================================================
-# 3. Placeholder model loading
+# 5. Optional backend loading
 # ============================================================
+
 
 @st.cache_resource(show_spinner=False)
-def load_pipeline():
+def load_pipeline(enable_backend: bool):
+    """Load backend only when the sidebar toggle is enabled.
+
+    Report v15 says several model/fusion outputs are currently implemented
+    but untrained or uncalibrated. For that reason the default UI mode is
+    frontend-only: it displays the expected dashboard structure without
+    pretending unvalidated scores are available.
     """
-    TODO:
-    Later, after your real model / calibrated model is ready,
-    replace this function with your actual loading code.
+    if not enable_backend:
+        return None
 
-    Example future structure:
+    from risk_detection.model import IntegratedInferencePipeline
 
-        from risk_detection.model.integrated_pipeline import IntegratedInferencePipeline
-        import torch
-
-        pipeline = IntegratedInferencePipeline.from_pretrained()
-
-        checkpoint_dir = PROJECT_ROOT / "checkpoints"
-
-        pipeline.risk_fusion.load_state_dict(
-            torch.load(checkpoint_dir / "risk_fusion.pt", map_location="cpu")
-        )
-
-        pipeline.emotion_score_head.load_state_dict(
-            torch.load(checkpoint_dir / "emotion_score_head.pt", map_location="cpu")
-        )
-
-        return pipeline
-
-    For now, return None so the frontend can run without fake model scores.
-    """
-    return None
+    return IntegratedInferencePipeline.from_pretrained()
 
 
 # ============================================================
-# 4. Result conversion
+# 6. Dashboard result normalization
 # ============================================================
+
 
 def empty_dashboard_result(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Used before the real backend is connected.
-    No fake scores. Everything missing is None or empty.
-    """
     return {
         "analysis_available": False,
-        "status": "Model pipeline is not connected yet. Scores are waiting for backend integration.",
-
+        "output_status": FRONTEND_ONLY_STATUS,
+        "status_message": "Frontend is ready. Backend pipeline is not connected in this run, so scores are N/A.",
         "overall_risk": None,
-        "risk_level": "Pending",
-        "safety_score": None,
-        "emotion_score": None,
-
-        "component_scores": {
-            "cyberbullying": None,
-            "grooming": None,
-            "early_predator": None,
-            "rule_score": None,
+        "risk_level": "pending",
+        "summary_scores": {
+            "safety_score": None,
+            "emotion_score": None,
+            "overall_score": None,
         },
-
-        "emotion_report": {
-            "fear": None,
-            "sadness": None,
-            "anger": None,
-            "distress": None,
-            "dependency": None,
-        },
-
-        "historical_state": {
+        "component_scores": {name: None for name in COMPONENT_SCORE_NAMES},
+        "early_warning": {
+            "triggered": None,
+            "method": "persistence_based_baseline",
             "accumulated_risk": None,
             "risk_trend": None,
-            "risk_trend_label": "Pending",
+            "risk_trend_label": "pending",
             "persistence": None,
         },
-
-        "confidence": None,
-        "uncertainty": None,
-        "human_review_required": None,
-
-        "evidence_messages": {
-            "cyberbullying": [],
-            "conversation": [],
-            "rule": [],
-            "emotion": [],
+        "emotion_report": {
+            "emotion_score": None,
+            "score_status": "unavailable_until_backend_connected",
+            "signals": {name: None for name in MAPPED_EMOTION_NAMES},
+            "primary_emotions": [],
+            "interpretation": "No emotion analysis is available until the backend is connected.",
+            "model_type": "GoEmotions mapping + prototype emotion layer",
         },
-
+        "evidence_messages": {name: [] for name in EVIDENCE_TYPES},
+        "uncertainty": None,
+        "confidence": None,
+        "human_review_required": None,
         "messages": messages,
-
         "limitations": [
+            "Frontend-only mode: no backend model scores have been computed.",
             "This is a decision-support system. It does not automatically accuse, diagnose, report, or enforce.",
-            "Evidence should be interpreted by a human analyst.",
-            "Scores are unavailable until the backend model pipeline is connected.",
+            "Evidence and review recommendations must be interpreted by a human analyst.",
         ],
     }
 
 
-def evidence_to_dict(evidence: Any) -> dict[str, list[int]]:
-    """
-    Converts your EvidenceBundle into frontend-friendly message numbers.
+def emotion_report_from_raw_result(raw_result: Any) -> dict[str, Any]:
+    """Fallback when risk_detection.model.to_dashboard_dict is unavailable."""
+    vector = getattr(raw_result, "mapped_emotions", None)
+    values = tensor_to_flat_list(vector)
 
-    Your backend currently returns zero-based indices.
-    The frontend displays messages starting from 1, so we add +1.
-    """
-    if evidence is None:
-        return {
-            "cyberbullying": [],
-            "conversation": [],
-            "rule": [],
-            "emotion": [],
-        }
+    signals = {name: None for name in MAPPED_EMOTION_NAMES}
 
-    output = {}
+    if len(values) >= len(MAPPED_EMOTION_NAMES):
+        signals = dict(zip(MAPPED_EMOTION_NAMES, values[: len(MAPPED_EMOTION_NAMES)]))
 
-    for key in ["cyberbullying", "conversation", "rule", "emotion"]:
-        raw_indices = getattr(evidence, key, []) or []
+    numeric_signals = {key: value for key, value in signals.items() if value is not None}
+    primary = sorted(numeric_signals, key=numeric_signals.get, reverse=True)[:3]
 
-        converted = []
-        for idx in raw_indices:
-            try:
-                converted.append(int(idx) + 1)
-            except Exception:
-                pass
-
-        output[key] = converted
-
-    return output
-
-
-def result_to_dashboard_dict(raw_result: Any, messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Converts IntegratedInferenceResult into a frontend dictionary.
-
-    This is where the Streamlit frontend connects to your project backend.
-
-    Current backend fields:
-        raw_result.safety_score
-        raw_result.emotion_score
-        raw_result.overall_score
-        raw_result.component_scores
-        raw_result.historical_state
-        raw_result.risk_trend_label
-        raw_result.evidence
-        raw_result.uncertainty_estimate
-        raw_result.human_review_required
-        raw_result.limitations
-
-    Future optional field:
-        raw_result.mapped_emotions or raw_result.emotion_vector
-    """
-    overall_risk = tensor_to_float(getattr(raw_result, "overall_score", None))
-    safety_score = tensor_to_float(getattr(raw_result, "safety_score", None))
-    emotion_score = tensor_to_float(getattr(raw_result, "emotion_score", None))
-
-    raw_components = getattr(raw_result, "component_scores", {}) or {}
-
-    component_scores = {
-        "cyberbullying": tensor_to_float(raw_components.get("cyberbullying")),
-        "grooming": tensor_to_float(raw_components.get("grooming")),
-        "early_predator": tensor_to_float(raw_components.get("early_predator")),
-        "rule_score": tensor_to_float(raw_components.get("rule_score")),
-    }
-
-    historical_state = getattr(raw_result, "historical_state", None)
-
-    historical_state_dict = {
-        "accumulated_risk": tensor_to_float(getattr(historical_state, "accumulated_risk", None)),
-        "risk_trend": tensor_to_float(getattr(historical_state, "risk_trend", None)),
-        "risk_trend_label": getattr(raw_result, "risk_trend_label", "Pending"),
-        "persistence": tensor_to_float(getattr(historical_state, "persistence", None)),
-    }
-
-    uncertainty_estimate = getattr(raw_result, "uncertainty_estimate", None)
-
-    confidence = tensor_to_float(getattr(uncertainty_estimate, "confidence", None))
-    uncertainty = tensor_to_float(getattr(uncertainty_estimate, "uncertainty", None))
-
-    evidence_messages = evidence_to_dict(getattr(raw_result, "evidence", None))
-
-    # ------------------------------------------------------------
-    # Emotion report
-    # ------------------------------------------------------------
-    # Your current IntegratedInferenceResult does not return M_t yet.
-    # Later, if you add one of these fields:
-    #
-    #     raw_result.mapped_emotions
-    #     raw_result.emotion_vector
-    #
-    # this frontend will automatically show:
-    # fear, sadness, anger, distress, dependency
-    # ------------------------------------------------------------
-
-    emotion_vector = None
-
-    if hasattr(raw_result, "mapped_emotions"):
-        emotion_vector = getattr(raw_result, "mapped_emotions")
-    elif hasattr(raw_result, "emotion_vector"):
-        emotion_vector = getattr(raw_result, "emotion_vector")
-
-    emotion_values = tensor_to_list(emotion_vector)
-
-    if len(emotion_values) >= 5:
-        emotion_report = {
-            "fear": emotion_values[0],
-            "sadness": emotion_values[1],
-            "anger": emotion_values[2],
-            "distress": emotion_values[3],
-            "dependency": emotion_values[4],
-        }
+    if primary:
+        interpretation = f"Elevated emotional signals to inspect: {', '.join(primary)}."
     else:
-        emotion_report = {
-            "fear": None,
-            "sadness": None,
-            "anger": None,
-            "distress": None,
-            "dependency": None,
-        }
+        interpretation = "No mapped emotion signals are available."
 
     return {
-        "analysis_available": True,
-        "status": "Analysis completed.",
-
-        "overall_risk": overall_risk,
-        "risk_level": risk_level(overall_risk),
-        "safety_score": safety_score,
-        "emotion_score": emotion_score,
-
-        "component_scores": component_scores,
-        "emotion_report": emotion_report,
-        "historical_state": historical_state_dict,
-
-        "confidence": confidence,
-        "uncertainty": uncertainty,
-        "human_review_required": bool(getattr(raw_result, "human_review_required", False)),
-
-        "evidence_messages": evidence_messages,
-        "messages": messages,
-
-        "limitations": list(getattr(raw_result, "limitations", [])),
+        "emotion_score": tensor_to_float(getattr(raw_result, "emotion_score", None)),
+        "score_status": "illustrative_placeholder",
+        "signals": signals,
+        "primary_emotions": primary,
+        "interpretation": interpretation,
+        "model_type": "uncalibrated_prototype_emotion_layer",
     }
+
+
+def normalize_dashboard_dict(
+    dashboard: dict[str, Any],
+    raw_result: Any | None,
+    messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Normalize backend Section-16 JSON into the exact shape the frontend uses."""
+    summary = dashboard.get("summary_scores", {}) or {}
+
+    if dashboard.get("emotion_report") is not None:
+        emotion_report = dashboard.get("emotion_report") or {}
+    elif raw_result is not None:
+        emotion_report = emotion_report_from_raw_result(raw_result)
+    else:
+        emotion_report = empty_dashboard_result(messages)["emotion_report"]
+
+    component_scores = dashboard.get("component_scores", {}) or {}
+    component_scores = {
+        name: tensor_to_float(component_scores.get(name))
+        for name in COMPONENT_SCORE_NAMES
+    }
+
+    early_warning = dashboard.get("early_warning", {}) or {}
+
+    overall_score = tensor_to_float(summary.get("overall_score", dashboard.get("overall_risk")))
+
+    normalized = {
+        "analysis_available": True,
+        "output_status": dashboard.get("output_status", BACKEND_STATUS),
+        "status_message": (
+            "Backend analysis completed. Treat uncalibrated prototype outputs as illustrative "
+            "unless the status says validated."
+        ),
+        "overall_risk": tensor_to_float(dashboard.get("overall_risk", overall_score)),
+        "risk_level": dashboard.get("risk_level") or frontend_risk_level(overall_score),
+        "summary_scores": {
+            "safety_score": tensor_to_float(summary.get("safety_score")),
+            "emotion_score": tensor_to_float(summary.get("emotion_score")),
+            "overall_score": overall_score,
+        },
+        "component_scores": component_scores,
+        "early_warning": {
+            "triggered": coerce_bool(early_warning.get("triggered")),
+            "method": early_warning.get("method", "persistence_based_baseline"),
+            "accumulated_risk": tensor_to_float(early_warning.get("accumulated_risk")),
+            "risk_trend": tensor_to_float(early_warning.get("risk_trend")),
+            "risk_trend_label": early_warning.get("risk_trend_label", "pending"),
+            "persistence": tensor_to_float(early_warning.get("persistence")),
+        },
+        "emotion_report": {
+            "emotion_score": tensor_to_float(emotion_report.get("emotion_score")),
+            "score_status": emotion_report.get("score_status", "illustrative_placeholder"),
+            "signals": {
+                name: tensor_to_float((emotion_report.get("signals") or {}).get(name))
+                for name in MAPPED_EMOTION_NAMES
+            },
+            "primary_emotions": list(emotion_report.get("primary_emotions") or []),
+            "interpretation": emotion_report.get("interpretation", ""),
+            "model_type": emotion_report.get("model_type", "uncalibrated_prototype_emotion_layer"),
+        },
+        "evidence_messages": one_index_evidence(dashboard.get("evidence_messages")),
+        "uncertainty": tensor_to_float(dashboard.get("uncertainty")),
+        "confidence": tensor_to_float(dashboard.get("confidence")),
+        "human_review_required": coerce_bool(dashboard.get("human_review_required")),
+        "messages": messages,
+        "limitations": list(getattr(raw_result, "limitations", [])) if raw_result is not None else [],
+    }
+
+    if not normalized["limitations"]:
+        normalized["limitations"] = [
+            "This is a decision-support system, not an automatic enforcement system.",
+            "Some current prototype scores may be untrained or uncalibrated placeholders.",
+            "All evidence must be interpreted by a human analyst.",
+        ]
+
+    return normalized
+
+
+def raw_result_to_dashboard(raw_result: Any, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Use backend's v15 Section-16 serializer when available."""
+    try:
+        from risk_detection.model import to_dashboard_dict
+
+        dashboard = to_dashboard_dict(raw_result)
+        return normalize_dashboard_dict(dashboard, raw_result, messages)
+
+    except Exception:
+        dashboard = {
+            "output_status": BACKEND_STATUS,
+            "overall_risk": tensor_to_float(getattr(raw_result, "overall_score", None)),
+            "risk_level": frontend_risk_level(tensor_to_float(getattr(raw_result, "overall_score", None))),
+            "summary_scores": {
+                "safety_score": tensor_to_float(getattr(raw_result, "safety_score", None)),
+                "emotion_score": tensor_to_float(getattr(raw_result, "emotion_score", None)),
+                "overall_score": tensor_to_float(getattr(raw_result, "overall_score", None)),
+            },
+            "component_scores": getattr(raw_result, "component_scores", {}) or {},
+            "early_warning": (
+                getattr(raw_result, "early_warning", None).__dict__
+                if getattr(raw_result, "early_warning", None) is not None
+                else {}
+            ),
+            "emotion_report": emotion_report_from_raw_result(raw_result),
+            "evidence_messages": {
+                name: getattr(getattr(raw_result, "evidence", None), name, [])
+                for name in EVIDENCE_TYPES
+            },
+            "uncertainty": tensor_to_float(
+                getattr(getattr(raw_result, "uncertainty_estimate", None), "uncertainty", None)
+            ),
+            "confidence": tensor_to_float(
+                getattr(getattr(raw_result, "uncertainty_estimate", None), "confidence", None)
+            ),
+            "human_review_required": getattr(raw_result, "human_review_required", None),
+        }
+
+        return normalize_dashboard_dict(dashboard, raw_result, messages)
 
 
 def analyze_text(
     text: str,
     input_mode: str,
     window_size: int,
+    enable_backend: bool,
 ) -> dict[str, Any]:
-    """
-    Main analysis function used by Streamlit.
-
-    Right now:
-        - Parses the input.
-        - Builds the dashboard structure.
-        - If pipeline is None, returns empty N/A result.
-
-    Later:
-        - load_pipeline() will return your real model.
-        - pipeline.process(window) will produce real scores.
-    """
     all_messages = parse_messages(text, input_mode)
 
     if not all_messages:
         return empty_dashboard_result([])
 
-    if input_mode == "Conversation":
+    if input_mode == INPUT_MODE_CONVERSATION:
         model_messages = all_messages[-window_size:]
     else:
         model_messages = all_messages
 
-    pipeline = load_pipeline()
+    pipeline = load_pipeline(enable_backend)
 
     if pipeline is None:
         return empty_dashboard_result(model_messages)
@@ -471,31 +473,170 @@ def analyze_text(
     window = build_conversation_window(model_messages, window_size=window_size)
     raw_result = pipeline.process(window)
 
-    return result_to_dashboard_dict(raw_result, model_messages)
+    return raw_result_to_dashboard(raw_result, model_messages)
 
 
 # ============================================================
-# 5. UI helpers
+# 7. Rendering helpers
 # ============================================================
+
+
+def render_status(result: dict[str, Any]) -> None:
+    status = result.get("output_status", "unknown")
+
+    if result.get("analysis_available"):
+        st.success(result.get("status_message", "Analysis completed."))
+    else:
+        st.warning(result.get("status_message", "Backend is not connected."))
+
+    if status == "illustrative_unvalidated_example":
+        st.info(
+            "Output status: illustrative / unvalidated prototype. Report v15 says Grooming, "
+            "EmotionScoreHead, RiskFusion, and calibration weights are not yet validated, "
+            "so these scores should not be treated as operational conclusions."
+        )
+    elif status == FRONTEND_ONLY_STATUS:
+        st.info(
+            "Output status: frontend-only placeholder. "
+            "The page layout is ready, but no model output has been computed."
+        )
+    else:
+        st.info(f"Output status: {status}")
+
+
+def render_score_cards(result: dict[str, Any]) -> None:
+    summary = result["summary_scores"]
+
+    st.subheader("Summary Scores")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Overall Risk", display_score(summary.get("overall_score") or result.get("overall_risk")))
+    col2.metric("Safety Score", display_score(summary.get("safety_score")))
+    col3.metric("Emotion Score", display_score(summary.get("emotion_score")))
+    col4.metric("Risk Level", str(result.get("risk_level", "pending")).upper())
+
+
+def render_human_review(result: dict[str, Any]) -> None:
+    st.subheader("Human Review Recommendation")
+
+    review = result.get("human_review_required")
+
+    if review is True:
+        st.error("Human Review Required")
+    elif review is False:
+        st.success("No immediate human review required")
+    else:
+        st.info("Pending — no backend review decision is available yet.")
+
+    st.caption(
+        "In the current prototype, the rule-based review subset is the operable part today: "
+        "rule_score ≥ 0.8 or a direct threat-phrase rule trigger. Model-score-based routing "
+        "remains unvalidated until calibration is finished."
+    )
+
 
 def render_score_chart(title: str, score_dict: dict[str, float | None]) -> None:
-    rows = []
-
-    for name, value in score_dict.items():
-        if value is not None:
-            rows.append({"Name": name, "Score": value})
-
     st.subheader(title)
+
+    rows = [
+        {"Name": key, "Score": value}
+        for key, value in score_dict.items()
+        if value is not None
+    ]
 
     if not rows:
         st.info("No score data available yet.")
         return
 
-    df = pd.DataFrame(rows)
-    st.bar_chart(df.set_index("Name"))
+    df = pd.DataFrame(rows).set_index("Name")
+    st.bar_chart(df)
 
 
-def render_messages_with_evidence(
+def render_early_warning(early_warning: dict[str, Any]) -> None:
+    st.subheader("Persistence-Based Early Warning")
+
+    triggered = early_warning.get("triggered")
+
+    if triggered is True:
+        st.error("Early warning triggered")
+    elif triggered is False:
+        st.success("Early warning not triggered")
+    else:
+        st.info("Early warning pending — backend not connected.")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Accumulated Risk", display_score(early_warning.get("accumulated_risk")))
+    col2.metric("Risk Trend", display_score(early_warning.get("risk_trend")))
+    col3.metric("Trend Label", str(early_warning.get("risk_trend_label", "pending")))
+    col4.metric("Persistence", display_score(early_warning.get("persistence")))
+
+    st.caption(f"Method: {early_warning.get('method', 'persistence_based_baseline')}")
+
+
+def render_emotion_report(emotion_report: dict[str, Any]) -> None:
+    st.subheader("Emotion Report")
+
+    col1, col2 = st.columns(2)
+
+    col1.metric("Emotion Score", display_score(emotion_report.get("emotion_score")))
+    col2.metric("Score Status", str(emotion_report.get("score_status", "pending")))
+
+    st.caption(f"Model type: {emotion_report.get('model_type', 'unknown')}")
+
+    signals = emotion_report.get("signals", {}) or {}
+
+    render_score_chart("Mapped Emotion Signals", signals)
+
+    primary = emotion_report.get("primary_emotions") or []
+
+    if primary:
+        st.write("Primary emotions:", ", ".join(primary))
+    else:
+        st.write("Primary emotions: N/A")
+
+    interpretation = emotion_report.get("interpretation")
+
+    if interpretation:
+        st.info(interpretation)
+
+
+def render_confidence(result: dict[str, Any]) -> None:
+    st.subheader("Confidence / Uncertainty")
+
+    col1, col2 = st.columns(2)
+
+    col1.metric(
+        "Confidence",
+        display_score(result.get("confidence")),
+        help="Prediction stability, not correctness probability.",
+    )
+    col2.metric("Uncertainty", display_score(result.get("uncertainty")))
+
+
+def render_evidence(evidence_messages: dict[str, list[int]]) -> None:
+    st.subheader("Evidence Messages")
+
+    st.caption(
+        "Message numbers below are 1-based for readability. "
+        "Attention evidence indicates model focus, not proof."
+    )
+
+    cols = st.columns(4)
+
+    for col, evidence_type in zip(cols, EVIDENCE_TYPES):
+        ids = evidence_messages.get(evidence_type, []) or []
+
+        with col:
+            st.metric(evidence_type.replace("_", " ").title(), len(ids))
+            st.write(ids if ids else "—")
+
+    with st.expander("Raw evidence JSON"):
+        st.json(evidence_messages)
+
+
+def render_messages(
     messages: list[dict[str, Any]],
     evidence_messages: dict[str, list[int]],
 ) -> None:
@@ -505,47 +646,35 @@ def render_messages_with_evidence(
         st.info("No messages to display.")
         return
 
-    highlighted_ids = set()
+    highlighted: set[int] = set()
+    evidence_by_id: dict[int, list[str]] = {}
 
-    for ids in evidence_messages.values():
-        for idx in ids:
-            highlighted_ids.add(idx)
+    for evidence_type, ids in evidence_messages.items():
+        for msg_id in ids:
+            highlighted.add(msg_id)
+            evidence_by_id.setdefault(msg_id, []).append(evidence_type)
 
     for idx, msg in enumerate(messages, start=1):
         speaker = msg.get("speaker", "unknown")
         text = msg.get("text", "")
+        evidence_tags = evidence_by_id.get(idx, [])
+        label = f"Message {idx} — {speaker}"
 
-        line = f"**Message {idx} — {speaker}:** {text}"
-
-        if idx in highlighted_ids:
-            st.warning(line)
+        if idx in highlighted:
+            st.warning(f"**{label}**  · evidence: {', '.join(evidence_tags)}\n\n{text}")
         else:
-            st.write(line)
-
-
-def render_evidence(evidence_messages: dict[str, list[int]]) -> None:
-    st.subheader("Evidence Messages")
-
-    if not evidence_messages:
-        st.info("No evidence available yet.")
-        return
-
-    st.json(evidence_messages)
+            st.write(f"**{label}**\n\n{text}")
 
 
 def render_limitations(limitations: list[str]) -> None:
     st.subheader("Limitations")
-
-    if not limitations:
-        st.info("No limitations provided.")
-        return
 
     for item in limitations:
         st.info(item)
 
 
 # ============================================================
-# 6. Sidebar sample inputs
+# 8. Sample inputs
 # ============================================================
 
 SAMPLE_CONVERSATION = """UserA: Hey, are you online right now?
@@ -564,67 +693,86 @@ UserA: Come on, don’t be difficult. Just keep this between us."""
 
 SAMPLE_THREAT_LETTER = """To whoever reads this,
 
-You have ignored my warnings for too long. If you keep talking about me or try to report this, there will be consequences. I know where you usually go after school, and I can make sure everyone sees the messages I saved.
+You have ignored my warnings for too long. If you keep talking about me or try to report this, there will be consequences. I saved screenshots and I can make things much worse for you.
 
 Do not show this letter to anyone. Do not tell your parents. If you do, things will get much worse for you.
 
 This is your final warning."""
 
+SAMPLE_SAFE_CONVERSATION = """StudentA: Did you finish the project slides?
+StudentB: Almost. I added the model architecture diagram.
+StudentA: Great. I’ll review the dashboard section tonight.
+StudentB: Thanks. We should also mention the limitations clearly.
+StudentA: Agreed. Let’s keep the demo simple and explain that it is decision-support only."""
+
 
 # ============================================================
-# 7. Main Streamlit UI
+# 9. Main UI
 # ============================================================
 
 st.title("🛡️ Hybrid Conversation Risk Detection Dashboard")
 
 st.caption(
-    "Cyberbullying · Online Grooming · Early Predator Risk · Emotion Signals · Human Review Support"
+    "Cyberbullying · Online Grooming · Persistence-Based Early Warning · Emotion Signals · Human Review Support"
 )
 
-st.sidebar.header("Settings")
+with st.sidebar:
+    st.header("Settings")
 
-input_mode = st.sidebar.radio(
-    "Input Mode",
-    ["Conversation", "Single Text / Letter"],
-    horizontal=False,
-)
+    input_mode = st.radio(
+        "Input Mode",
+        [INPUT_MODE_CONVERSATION, INPUT_MODE_SINGLE_TEXT],
+        horizontal=False,
+    )
 
-window_size = st.sidebar.slider(
-    "Rolling Window Size",
-    min_value=1,
-    max_value=30,
-    value=12,
-    step=1,
-)
+    window_size = st.slider(
+        "Rolling Window Size",
+        min_value=1,
+        max_value=30,
+        value=12,
+        step=1,
+    )
 
-st.sidebar.divider()
+    enable_backend = st.toggle(
+        "Try real backend pipeline",
+        value=False,
+        help=(
+            "Off by default so the frontend can run without downloading Hugging Face models. "
+            "Turn on only when backend dependencies/checkpoints are ready."
+        ),
+    )
 
-if "conversation_input" not in st.session_state:
-    st.session_state.conversation_input = ""
+    st.divider()
 
-if st.sidebar.button("Load Sample Conversation"):
-    st.session_state.conversation_input = SAMPLE_CONVERSATION
+    st.caption("Sample Inputs")
 
-if st.sidebar.button("Load Sample Threat Letter"):
-    st.session_state.conversation_input = SAMPLE_THREAT_LETTER
+    if "conversation_input" not in st.session_state:
+        st.session_state.conversation_input = ""
 
-st.sidebar.divider()
+    if st.button("Load Sample Conversation"):
+        st.session_state.conversation_input = SAMPLE_CONVERSATION
+        st.session_state.last_result = None
 
-st.sidebar.info(
-    "Current version uses backend placeholders. "
-    "Scores will show N/A until load_pipeline() is connected to your real model."
-)
+    if st.button("Load Sample Threat Letter"):
+        st.session_state.conversation_input = SAMPLE_THREAT_LETTER
+        st.session_state.last_result = None
+
+    if st.button("Load Safe Conversation"):
+        st.session_state.conversation_input = SAMPLE_SAFE_CONVERSATION
+        st.session_state.last_result = None
+
+    st.divider()
+
+    st.info(
+        "Report v15 status: the dashboard is implemented, but several model/fusion scores "
+        "are currently illustrative until training and calibration are complete."
+    )
 
 conversation_text = st.text_area(
     "Paste conversation or single text here",
     key="conversation_input",
-    height=280,
-    placeholder=(
-        "Example:\n"
-        "UserA: Hey, keep this between us...\n"
-        "UserB: Why?\n"
-        "UserA: Just trust me."
-    ),
+    height=300,
+    placeholder="UserA: Hey, keep this between us...\nUserB: Why?\nUserA: Just trust me.",
 )
 
 analyze_clicked = st.button("Analyze", type="primary")
@@ -634,126 +782,48 @@ if analyze_clicked:
         st.warning("Please paste a conversation or text first.")
     else:
         try:
-            result = analyze_text(
+            st.session_state.last_result = analyze_text(
                 text=conversation_text,
                 input_mode=input_mode,
                 window_size=window_size,
+                enable_backend=enable_backend,
             )
-
-            st.session_state["last_result"] = result
-
         except Exception as exc:
             st.error("Analysis failed.")
             st.exception(exc)
-
 
 result = st.session_state.get("last_result")
 
 if result is None:
     st.info("Paste text above and click Analyze.")
 else:
-    if result["analysis_available"]:
-        st.success(result["status"])
-    else:
-        st.warning(result["status"])
+    render_status(result)
+    render_score_cards(result)
+    render_human_review(result)
+    render_confidence(result)
 
-    # ------------------------------------------------------------
-    # Main score cards
-    # ------------------------------------------------------------
-
-    st.subheader("Summary Scores")
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric("Overall Risk", display_score(result["overall_risk"]))
-    col2.metric("Safety Score", display_score(result["safety_score"]))
-    col3.metric("Emotion Score", display_score(result["emotion_score"]))
-    col4.metric("Risk Level", result["risk_level"])
-
-    # ------------------------------------------------------------
-    # Human review
-    # ------------------------------------------------------------
-
-    review_required = result["human_review_required"]
-
-    if review_required is True:
-        st.error("Human Review Required")
-    elif review_required is False:
-        st.success("No immediate human review required")
-    else:
-        st.info("Human review decision is pending because model output is not available yet.")
-
-    # ------------------------------------------------------------
-    # Confidence and uncertainty
-    # ------------------------------------------------------------
-
-    st.subheader("Confidence / Uncertainty")
-
-    col5, col6 = st.columns(2)
-
-    col5.metric("Confidence", display_score(result["confidence"]))
-    col6.metric("Uncertainty", display_score(result["uncertainty"]))
-
-    # ------------------------------------------------------------
-    # Component scores
-    # ------------------------------------------------------------
-
-    render_score_chart(
-        "Component Scores",
-        result["component_scores"],
+    tab_scores, tab_emotion, tab_evidence, tab_text, tab_limits = st.tabs(
+        ["Scores", "Emotion", "Evidence", "Messages", "Limitations"]
     )
 
-    # ------------------------------------------------------------
-    # Emotion report
-    # ------------------------------------------------------------
+    with tab_scores:
+        render_score_chart("Component Scores", result["component_scores"])
+        render_early_warning(result["early_warning"])
 
-    render_score_chart(
-        "Emotion Report",
-        result["emotion_report"],
-    )
+    with tab_emotion:
+        render_emotion_report(result["emotion_report"])
 
-    # ------------------------------------------------------------
-    # Historical state
-    # ------------------------------------------------------------
+    with tab_evidence:
+        render_evidence(result["evidence_messages"])
 
-    st.subheader("Historical State")
+    with tab_text:
+        render_messages(result["messages"], result["evidence_messages"])
 
-    historical_state = result["historical_state"]
+        if input_mode == INPUT_MODE_SINGLE_TEXT:
+            st.info(
+                "Single-text mode is most useful for threat/rule/cyberbullying/emotion inspection. "
+                "Grooming and early-warning logic are more reliable with multi-turn context."
+            )
 
-    col7, col8, col9, col10 = st.columns(4)
-
-    col7.metric("Accumulated Risk", display_score(historical_state["accumulated_risk"]))
-    col8.metric("Risk Trend", display_score(historical_state["risk_trend"]))
-    col9.metric("Trend Label", historical_state["risk_trend_label"])
-    col10.metric("Persistence", display_score(historical_state["persistence"]))
-
-    # ------------------------------------------------------------
-    # Evidence
-    # ------------------------------------------------------------
-
-    render_evidence(result["evidence_messages"])
-
-    # ------------------------------------------------------------
-    # Message view
-    # ------------------------------------------------------------
-
-    render_messages_with_evidence(
-        messages=result["messages"],
-        evidence_messages=result["evidence_messages"],
-    )
-
-    # ------------------------------------------------------------
-    # Single text warning
-    # ------------------------------------------------------------
-
-    if input_mode == "Single Text / Letter":
-        st.info(
-            "Single-text mode is best for threat, rule, cyberbullying, and emotion-risk analysis. "
-            "Grooming and early-detection scores may be less reliable because they depend on multi-turn context."
-        )
-
-    # ------------------------------------------------------------
-    # Limitations
-    # ------------------------------------------------------------
-
-    render_limitations(result["limitations"])
+    with tab_limits:
+        render_limitations(result["limitations"])
