@@ -1,3 +1,4 @@
+import pytest
 import torch
 from _tiny_bert import make_tiny_bert
 from _tiny_emotion_classifier import make_tiny_emotion_classifier
@@ -149,3 +150,89 @@ def test_modules_restored_to_eval_after_processing():
     assert pipeline.grooming_head.training is False
     assert pipeline.risk_fusion.training is False
     assert pipeline.emotion_classifier.training is False
+
+
+def _make_pipeline_with_grooming_head(
+    grooming_head, grooming_message_encoder=None, grooming_conversation_encoder=None, d: int = 8
+) -> IntegratedInferencePipeline:
+    tokenizer, bert = make_tiny_bert(hidden_size=d)
+    emo_tokenizer, emo_model = make_tiny_emotion_classifier(hidden_size=d)
+
+    return IntegratedInferencePipeline(
+        message_encoder=MessageEncoder(tokenizer=tokenizer, encoder=bert),
+        conversation_encoder=ConversationEncoder(d=d),
+        cyberbullying_head=CyberbullyingHead(d=d, d_z=d),
+        grooming_head=grooming_head,
+        emotion_classifier=GoEmotionsClassifier(tokenizer=emo_tokenizer, encoder=emo_model),
+        emotion_score_head=EmotionScoreHead(),
+        risk_fusion=PrototypeRiskFusion(),
+        historical_state_updater=HistoricalStateUpdater(),
+        safety_feature_extractor=SafetyFeatureExtractor(
+            llm_extractor=_StubLLMExtractor(),
+            rule_extractor=RuleSignalExtractor(),
+        ),
+        dependency_extractor=_StubDependencyExtractor(),
+        grooming_message_encoder=grooming_message_encoder,
+        grooming_conversation_encoder=grooming_conversation_encoder,
+        mc_dropout_passes=3,
+    )
+
+
+def test_grooming_head_with_safety_dim_zero_gets_empty_safety_tensor():
+    """Variant A style (text-only): GroomingHead(safety_dim=0) must not
+    shape-mismatch against the live 11-dim safety feature vector."""
+    pipeline = _make_pipeline_with_grooming_head(GroomingHead(d_z=8, safety_dim=0))
+
+    result = pipeline.process(_window())
+
+    assert 0.0 <= result.component_scores["grooming"].item() <= 1.0
+
+
+def test_grooming_head_with_safety_dim_five_gets_rule_signals_only():
+    """Variant B style (text + rules): GroomingHead(safety_dim=5) must
+    receive the 5-dim rule-signal slice, not the full 11-dim LLM+rule
+    vector that would shape-mismatch its first Linear layer."""
+    pipeline = _make_pipeline_with_grooming_head(GroomingHead(d_z=8, safety_dim=5))
+
+    result = pipeline.process(_window())
+
+    assert 0.0 <= result.component_scores["grooming"].item() <= 1.0
+
+
+def test_grooming_uses_dedicated_encoder_pair_when_given():
+    """A trained grooming checkpoint was fine-tuned with its own encoder
+    pair (scripts/train_grooming.py), not the cyberbullying-shared one --
+    confirm the pipeline actually uses the dedicated pair, and restores it
+    to eval() afterward like every other module."""
+    d = 8
+    g_tokenizer, g_bert = make_tiny_bert(hidden_size=d)
+    grooming_message_encoder = MessageEncoder(tokenizer=g_tokenizer, encoder=g_bert)
+    grooming_conversation_encoder = ConversationEncoder(d=d)
+
+    pipeline = _make_pipeline_with_grooming_head(
+        GroomingHead(d_z=d, safety_dim=5),
+        grooming_message_encoder=grooming_message_encoder,
+        grooming_conversation_encoder=grooming_conversation_encoder,
+        d=d,
+    )
+
+    assert pipeline.grooming_message_encoder is grooming_message_encoder
+    assert pipeline.grooming_message_encoder is not pipeline.message_encoder
+    assert pipeline.grooming_conversation_encoder is not pipeline.conversation_encoder
+
+    result = pipeline.process(_window())
+
+    assert 0.0 <= result.component_scores["grooming"].item() <= 1.0
+    assert pipeline.grooming_message_encoder.training is False
+    assert pipeline.grooming_conversation_encoder.training is False
+
+
+def test_grooming_safety_tensor_rejects_unsupported_safety_dim():
+    """GroomingHead.safety_dim must line up with either the rule-only (5)
+    or full LLM+rule (11) vector width, or 0 for text-only -- anything
+    else should fail loudly here rather than shape-mismatching deep
+    inside GroomingHead.forward()."""
+    pipeline = _make_pipeline_with_grooming_head(GroomingHead(d_z=8, safety_dim=7))
+
+    with pytest.raises(ValueError, match="safety_dim=7"):
+        pipeline.process(_window())

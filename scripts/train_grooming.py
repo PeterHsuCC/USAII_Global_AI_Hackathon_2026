@@ -31,7 +31,9 @@ Data prerequisites: a generated PAN12 datapack under --pan12-dir (see
 data/README.md and data/PAN12/create_datapack.py -- this script does not
 generate that itself, it only consumes it via risk_detection.data.pan12).
 Optionally also a VTPAN datapack under --vtpan-dir for the Section 19.1
-supplementary evaluation.
+supplementary evaluation, and/or --identity-disjoint for the Section 19.2
+supplementary evaluation (excludes PAN12's officially-overlapping predator
+ids from training; the official test corpus is left unchanged either way).
 
 Like scripts/train_cyberbullying.py: do NOT reduce --epochs to save
 compute. --max-conversations exists only for a quick pre-flight smoke
@@ -55,7 +57,14 @@ from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
 from risk_detection.conversation import ConversationWindow
-from risk_detection.data.pan12 import ConversationSample, default_pan12_dir, full_conversation_samples, load_split
+from risk_detection.data.pan12 import (
+    ConversationSample,
+    default_overlapping_predator_ids,
+    default_pan12_dir,
+    filter_identity_disjoint,
+    full_conversation_samples,
+    load_split,
+)
 from risk_detection.model import ConversationEncoder, GroomingHead, MessageEncoder, binary_review_loss
 from risk_detection.signals.llm_safety import LLMSafetySignalExtractor
 from risk_detection.signals.rules import RuleSignalExtractor
@@ -100,20 +109,21 @@ def build_safety_features(
     sample: ConversationSample,
     rule_extractor: RuleSignalExtractor,
     llm_cache: CachedLLMSafetyExtractor | None,
+    device: torch.device | None = None,
 ) -> torch.Tensor:
     if variant == "A":
-        return torch.zeros(0)
+        return torch.zeros(0, device=device)
 
     window = sample.to_window()
     rule_vec = rule_extractor.extract(window).to_vector()  # 5-dim, [Q_t]
     if variant == "B":
-        return torch.tensor(rule_vec, dtype=torch.float32)
+        return torch.tensor(rule_vec, dtype=torch.float32, device=device)
 
     # Variant C: [L_t ; Q_t], 11-dim
     assert llm_cache is not None
     cache_key = f"{sample.conversation_id}:{sample.window_start}-{sample.window_end}"
     llm_vec = llm_cache.get(cache_key, window)
-    return torch.tensor(llm_vec + rule_vec, dtype=torch.float32)
+    return torch.tensor(llm_vec + rule_vec, dtype=torch.float32, device=device)
 
 
 def encode_sample(
@@ -165,6 +175,7 @@ def evaluate(
     head: GroomingHead,
     rule_extractor: RuleSignalExtractor,
     llm_cache: CachedLLMSafetyExtractor | None,
+    device: torch.device,
 ) -> EvalMetrics:
     message_encoder.eval()
     conversation_encoder.eval()
@@ -180,10 +191,10 @@ def evaluate(
     with torch.no_grad():
         for sample in samples:
             z = encode_sample(sample, message_encoder, conversation_encoder)
-            safety = build_safety_features(variant, sample, rule_extractor, llm_cache)
+            safety = build_safety_features(variant, sample, rule_extractor, llm_cache, device=device)
             s_g, _b_t = head(z, safety)
 
-            label = torch.tensor(float(sample.label))
+            label = torch.tensor(float(sample.label), device=device)
             total_loss += binary_review_loss(s_g, label).item()
 
             pred = s_g.item() >= 0.5
@@ -219,6 +230,11 @@ def train_one_variant(
     print(f"\n=== Variant {variant} (safety_dim={SAFETY_DIM_BY_VARIANT[variant]}) ===")
 
     device = torch.device(args.device)
+
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     message_encoder = MessageEncoder(model_name=args.model_name, max_length=args.max_length)
     conversation_encoder = ConversationEncoder(d=message_encoder.d)
     head = GroomingHead(d_z=message_encoder.d, safety_dim=SAFETY_DIM_BY_VARIANT[variant])
@@ -242,6 +258,7 @@ def train_one_variant(
     optimizer = optim.AdamW(params, lr=args.lr)
 
     best_val_loss = float("inf")
+    checkpoint_saved = False
     rng = random.Random(args.seed)
 
     for epoch in range(args.epochs):
@@ -258,10 +275,10 @@ def train_one_variant(
         for step, idx in enumerate(order):
             sample = train_samples[idx]
             z = encode_sample(sample, message_encoder, conversation_encoder)
-            safety = build_safety_features(variant, sample, rule_extractor, llm_cache)
+            safety = build_safety_features(variant, sample, rule_extractor, llm_cache, device=device)
             s_g, _b_t = head(z, safety)
 
-            label = torch.tensor(float(sample.label))
+            label = torch.tensor(float(sample.label), device=device)
             loss = binary_review_loss(s_g, label) / args.batch_size
             loss.backward()
 
@@ -277,7 +294,7 @@ def train_one_variant(
                 print(f"  epoch {epoch} step {step}/{len(order)}: running_loss={running_loss / max(seen, 1):.4f}")
 
         val_metrics = evaluate(
-            val_samples, variant, message_encoder, conversation_encoder, head, rule_extractor, llm_cache
+            val_samples, variant, message_encoder, conversation_encoder, head, rule_extractor, llm_cache, device
         )
         print(
             f"epoch {epoch} [{variant}]: train_loss={running_loss / max(seen, 1):.4f} "
@@ -288,6 +305,7 @@ def train_one_variant(
 
         if val_metrics.loss < best_val_loss:
             best_val_loss = val_metrics.loss
+            checkpoint_saved = True
             save_artifact(message_encoder.state_dict(), args.output_dir, f"grooming_message_encoder_{variant}", run_timestamp)
             save_artifact(conversation_encoder.state_dict(), args.output_dir, f"grooming_conversation_encoder_{variant}", run_timestamp)
             save_artifact(head.state_dict(), args.output_dir, f"grooming_head_{variant}", run_timestamp)
@@ -296,8 +314,20 @@ def train_one_variant(
         if llm_cache is not None:
             llm_cache.save()
 
+    if checkpoint_saved:
+        message_encoder.load_state_dict(
+            torch.load(args.output_dir / f"grooming_message_encoder_{variant}.pt", map_location=device)
+        )
+        conversation_encoder.load_state_dict(
+            torch.load(args.output_dir / f"grooming_conversation_encoder_{variant}.pt", map_location=device)
+        )
+        head.load_state_dict(
+            torch.load(args.output_dir / f"grooming_head_{variant}.pt", map_location=device)
+        )
+        print(f"  -> reloaded best val_loss checkpoint (val_loss={best_val_loss:.4f}) before final test evaluation")
+
     test_metrics = evaluate(
-        test_samples, variant, message_encoder, conversation_encoder, head, rule_extractor, llm_cache
+        test_samples, variant, message_encoder, conversation_encoder, head, rule_extractor, llm_cache, device
     )
     print(
         f"[{variant}] official PAN12 test: loss={test_metrics.loss:.4f} acc={test_metrics.accuracy:.3f} "
@@ -306,7 +336,7 @@ def train_one_variant(
     )
     if vtpan_samples is not None:
         vtpan_metrics = evaluate(
-            vtpan_samples, variant, message_encoder, conversation_encoder, head, rule_extractor, llm_cache
+            vtpan_samples, variant, message_encoder, conversation_encoder, head, rule_extractor, llm_cache, device
         )
         print(
             f"[{variant}] VTPAN supplementary eval: loss={vtpan_metrics.loss:.4f} acc={vtpan_metrics.accuracy:.3f} "
@@ -318,9 +348,15 @@ def train_one_variant(
 
 
 def load_samples(
-    dataset_dir: Path, split: str, max_conversations: int | None, datapack_id: str = "PAN12"
+    dataset_dir: Path,
+    split: str,
+    max_conversations: int | None,
+    datapack_id: str = "PAN12",
+    excluded_author_ids: set[str] | None = None,
 ) -> list[ConversationSample]:
     conversations = load_split(dataset_dir, split, datapack_id=datapack_id)
+    if excluded_author_ids:
+        conversations = filter_identity_disjoint(conversations, excluded_author_ids)
     if max_conversations is not None:
         conversations = (c for i, c in enumerate(conversations) if i < max_conversations)
     return list(full_conversation_samples(conversations))
@@ -351,6 +387,14 @@ def main() -> None:
         help="Cap conversations per split, for a quick smoke test before a full run "
         "(PAN12 train/test have 66,927/155,128 conversations)",
     )
+    parser.add_argument(
+        "--identity-disjoint",
+        action="store_true",
+        help="Additionally exclude PAN12's officially-overlapping predator identities (Section 19.2; "
+        "2 ids as of the 2012-05-01 release) from the training pool. The official test corpus is left "
+        "unchanged, so this run's test metrics can be compared against the official-split run's to check "
+        "whether the overlap was inflating apparent performance.",
+    )
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--model-name", default="distilbert-base-uncased")
     parser.add_argument("--max-length", type=int, default=128)
@@ -366,9 +410,14 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    excluded_ids: set[str] = set()
+    if args.identity_disjoint:
+        excluded_ids = default_overlapping_predator_ids(args.pan12_dir)
+        print(f"--identity-disjoint: excluding {len(excluded_ids)} overlapping predator id(s) from training: {sorted(excluded_ids)}")
+
     print(f"Loading PAN12 train split from {args.pan12_dir} ...")
-    train_all = load_samples(args.pan12_dir, "train", args.max_conversations)
-    print(f"  {len(train_all)} conversations")
+    train_all = load_samples(args.pan12_dir, "train", args.max_conversations, excluded_author_ids=excluded_ids)
+    print(f"  {len(train_all)} conversations" + (" (after identity-disjoint filtering)" if excluded_ids else ""))
     print(f"Loading PAN12 test split from {args.pan12_dir} ...")
     test_samples = load_samples(args.pan12_dir, "test", args.max_conversations)
     print(f"  {len(test_samples)} conversations")

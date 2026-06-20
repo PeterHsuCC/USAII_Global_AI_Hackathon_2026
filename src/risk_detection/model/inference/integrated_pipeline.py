@@ -5,7 +5,7 @@ import torch
 from ...conversation import ConversationWindow
 from ...signals.emotional_dependency import EmotionalDependencyExtractor
 from ...signals.rule_score import rule_safety_score
-from ...signals.safety_features import SafetyFeatureExtractor
+from ...signals.safety_features import SafetyFeatureExtractor, SafetyFeatures
 from ..encoder.aggregation import max_mean_top3
 from ..encoder.conversation_encoder import ConversationEncoder
 from ..heads.cyberbullying_head import CyberbullyingHead
@@ -43,10 +43,12 @@ LIMITATIONS = (
     "the trainable safety and fusion components; it does not fully represent "
     "uncertainty in the frozen GoEmotions classifier or the emotion mapping layer.",
     "Safety Score, Overall Score, and the MC Dropout uncertainty estimate are "
-    "illustrative: the Grooming Head, EmotionScoreHead, and RiskFusion have "
-    "not yet been trained or calibrated (Section 19.5). Only the rule-based "
-    "human review condition and the persistence-based early warning below "
-    "are currently operable.",
+    "illustrative: EmotionScoreHead and RiskFusion have not yet been trained "
+    "or calibrated. The Grooming Head is only as good as whatever weights it "
+    "was constructed with -- untrained/random unless the caller explicitly "
+    "wired in a trained checkpoint (Section 19.5). Only the rule-based human "
+    "review condition and the persistence-based early warning below are "
+    "currently operable.",
     "All evidence must be interpreted by a human analyst.",
 )
 
@@ -113,6 +115,8 @@ class IntegratedInferencePipeline:
         early_warning_tracker: EarlyWarningTracker | None = None,
         safety_feature_extractor: SafetyFeatureExtractor | None = None,
         dependency_extractor: EmotionalDependencyExtractor | None = None,
+        grooming_message_encoder: MessageEncoder | None = None,
+        grooming_conversation_encoder: ConversationEncoder | None = None,
         lam: float = DEFAULT_LAMBDA,
         mc_dropout_passes: int = DEFAULT_MC_DROPOUT_PASSES,
         rule_weights: list[float] | None = None,
@@ -128,17 +132,27 @@ class IntegratedInferencePipeline:
         self.early_warning_tracker = early_warning_tracker or EarlyWarningTracker()
         self.safety_feature_extractor = safety_feature_extractor or SafetyFeatureExtractor()
         self.dependency_extractor = dependency_extractor or EmotionalDependencyExtractor()
+        # scripts/train_grooming.py fine-tunes message_encoder +
+        # conversation_encoder jointly with each GroomingHead variant, so a
+        # trained grooming checkpoint expects ITS OWN encoder pair, not the
+        # one shared with cyberbullying -- these default to the shared pair
+        # only when the caller has no variant-specific encoders to give
+        # (stub/test mode, from_pretrained()).
+        self.grooming_message_encoder = grooming_message_encoder or message_encoder
+        self.grooming_conversation_encoder = grooming_conversation_encoder or conversation_encoder
         self.lam = lam
         self.mc_dropout_passes = mc_dropout_passes
         self.rule_weights = rule_weights
 
         # Modules whose stochastic forward passes feed MC Dropout (Section
-        # 13): the shared encoder, conversation encoder, the two trainable
-        # task heads, and the fusion stage. The frozen GoEmotions
-        # classifier and the Emotion Score head are deliberately excluded.
+        # 13): both encoder pairs, the two trainable task heads, and the
+        # fusion stage. The frozen GoEmotions classifier and the Emotion
+        # Score head are deliberately excluded.
         self._safety_modules = (
             self.message_encoder,
             self.conversation_encoder,
+            self.grooming_message_encoder,
+            self.grooming_conversation_encoder,
             self.cyberbullying_head,
             self.grooming_head,
             self.risk_fusion,
@@ -155,9 +169,16 @@ class IntegratedInferencePipeline:
         mc_dropout_passes: int = DEFAULT_MC_DROPOUT_PASSES,
         early_warning_thresholds: EarlyWarningThresholds = DEFAULT_THRESHOLDS,
     ) -> "IntegratedInferencePipeline":
-        """Builds every component from pretrained checkpoints with
-        mutually consistent dimensions. Requires network access the first
-        time `encoder_model_name` / `emotion_model_name` are downloaded.
+        """Convenience constructor for ad-hoc/exploratory use: downloads the
+        pretrained encoder backbones (`encoder_model_name`,
+        `emotion_model_name`) but builds every trainable task head
+        (CyberbullyingHead, GroomingHead, EmotionScoreHead, RiskFusion)
+        freshly initialized -- it does NOT load this project's own trained
+        checkpoints. For that, see backend.model_runtime.loader._load_real,
+        which loads message_encoder.pt/cyberbullying_head.pt and the
+        Variant B grooming_*.pt trio (Section 19.5). Requires network
+        access the first time `encoder_model_name` / `emotion_model_name`
+        are downloaded.
         """
         message_encoder = MessageEncoder(model_name=encoder_model_name)
         d_z = d_z or message_encoder.d
@@ -183,11 +204,12 @@ class IntegratedInferencePipeline:
         # Steps 1-2: rolling window (caller-built) + structured safety signals
         rule_evidence_obj = self.safety_feature_extractor.rule_extractor.extract_evidence(window)
         features = self.safety_feature_extractor.extract(window)
-        safety_tensor = torch.tensor(features.to_vector(), dtype=torch.float32)
+        grooming_safety_tensor = self._grooming_safety_tensor(features)
 
         # Step 3: shared message + conversation encoding
         h = self.message_encoder.encode_window(window)
         z, alpha = self.conversation_encoder.encode(h)
+        z_g = self._grooming_z(window, z)
 
         # Step 4: Emotion Branch -- independent of z_t / F_t^safe, runs
         # sequentially here but has no data dependency on steps 3/5-9
@@ -203,7 +225,7 @@ class IntegratedInferencePipeline:
         s_cb = self.cyberbullying_head.window_score(per_message_risk)
 
         # Step 6: Grooming (B_t is not surfaced -- Behavior Head is untrained, Section 6)
-        s_g, _b_t_unused = self.grooming_head(z, safety_tensor)
+        s_g, _b_t_unused = self.grooming_head(z_g, grooming_safety_tensor)
 
         # Steps 7-8: advance H_t and evaluate the persistence-based warning
         new_state = self.historical_state_updater.update(
@@ -225,7 +247,7 @@ class IntegratedInferencePipeline:
 
         # Step 10: MC Dropout uncertainty around the deterministic estimate above
         # (illustrative only -- see LIMITATIONS)
-        uncertainty_estimate = self._mc_dropout(window, safety_tensor, s_r_tilde, s_emotion)
+        uncertainty_estimate = self._mc_dropout(window, grooming_safety_tensor, s_r_tilde, s_emotion)
 
         # Step 11: evidence + the currently-operable Human Review condition,
         # combined with the early-warning condition (Section 11/13/19.5)
@@ -268,7 +290,7 @@ class IntegratedInferencePipeline:
     def _mc_dropout(
         self,
         window: ConversationWindow,
-        safety_tensor: torch.Tensor,
+        grooming_safety_tensor: torch.Tensor,
         s_r_tilde: torch.Tensor,
         s_emotion: torch.Tensor,
     ) -> UncertaintyEstimate:
@@ -286,7 +308,8 @@ class IntegratedInferencePipeline:
             p_cb = self.cyberbullying_head.forward_stage2(h, z)
             risk = self.cyberbullying_head.risk(p_cb)
             s_cb = self.cyberbullying_head.window_score(risk)
-            s_g, _ = self.grooming_head(z, safety_tensor)
+            z_g = self._grooming_z(window, z)
+            s_g, _ = self.grooming_head(z_g, grooming_safety_tensor)
             fused = self.risk_fusion(s_cb, s_g, s_r_tilde, s_emotion)
             return fused.overall_score
 
@@ -297,3 +320,38 @@ class IntegratedInferencePipeline:
         finally:
             for module in self._safety_modules:
                 module.eval()
+
+    def _grooming_z(self, window: ConversationWindow, shared_z: torch.Tensor) -> torch.Tensor:
+        """Variant B's GroomingHead was fine-tuned jointly with its own
+        message/conversation encoder (scripts/train_grooming.py), not the
+        cyberbullying-shared one -- re-encode only when a distinct
+        grooming encoder pair was actually supplied."""
+        if self.grooming_message_encoder is self.message_encoder and (
+            self.grooming_conversation_encoder is self.conversation_encoder
+        ):
+            return shared_z
+        h_g = self.grooming_message_encoder.encode_window(window)
+        z_g, _alpha_g = self.grooming_conversation_encoder.encode(h_g)
+        return z_g
+
+    def _grooming_safety_tensor(self, features: SafetyFeatures) -> torch.Tensor:
+        """Builds the safety-feature vector GroomingHead actually expects,
+        matching scripts/train_grooming.py's build_safety_features:
+        safety_dim=0 -> none (Variant A), safety_dim=len(rule vector) ->
+        rule signals only (Variant B), safety_dim=len(full vector) ->
+        LLM + rule signals (Variant C). GroomingHead bakes safety_dim into
+        its first Linear layer's input width at construction time, so
+        feeding it the wrong width would shape-mismatch the forward pass."""
+        safety_dim = self.grooming_head.safety_dim
+        rule_vector = features.rule_signals.to_vector()
+        full_vector = features.to_vector()
+        if safety_dim == 0:
+            return torch.zeros(0)
+        if safety_dim == len(rule_vector):
+            return torch.tensor(rule_vector, dtype=torch.float32)
+        if safety_dim == len(full_vector):
+            return torch.tensor(full_vector, dtype=torch.float32)
+        raise ValueError(
+            f"GroomingHead.safety_dim={safety_dim} matches neither rule-only "
+            f"({len(rule_vector)}) nor full ({len(full_vector)}) safety feature width"
+        )

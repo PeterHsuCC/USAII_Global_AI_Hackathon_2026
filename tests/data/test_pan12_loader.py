@@ -1,6 +1,8 @@
 import json
 
 from risk_detection.data import (
+    default_overlapping_predator_ids,
+    filter_identity_disjoint,
     fixed_window_samples,
     full_conversation_samples,
     iter_conversations,
@@ -219,3 +221,47 @@ def test_to_window_remapping_is_independent_per_conversation(tmp_path):
 
     assert speakers_c1 == ["SPEAKER_A", "SPEAKER_B"]
     assert speakers_c2 == ["SPEAKER_A", "SPEAKER_B"]
+
+
+def test_default_overlapping_predator_ids_reads_both_official_lists(tmp_path):
+    raw_dir = tmp_path / "raw_dataset"
+    raw_dir.mkdir()
+    (raw_dir / "pan12-sexual-predator-identification-training-corpus-predators-2012-05-01.txt").write_text(
+        "p1\np2\np3\n", encoding="utf-8"
+    )
+    (raw_dir / "pan12-sexual-predator-identification-groundtruth-problem1.txt").write_text(
+        "p2\np4\n", encoding="utf-8"
+    )
+
+    assert default_overlapping_predator_ids(tmp_path) == {"p2"}
+
+
+def test_default_overlapping_predator_ids_missing_files_returns_empty_set(tmp_path):
+    assert default_overlapping_predator_ids(tmp_path) == set()
+
+
+def test_filter_identity_disjoint_drops_conversations_with_excluded_authors(tmp_path):
+    chats = {
+        "clean": {
+            "className": "predator",
+            "content": [_msg(1, "victim", "hi", 0.0, False), _msg(2, "groomer_a", "hey", 1.0, True)],
+        },
+        "excluded": {
+            "className": "predator",
+            "content": [_msg(1, "victim", "hi", 0.0, False), _msg(2, "groomer_b", "hey", 1.0, True)],
+        },
+    }
+    conversations = list(iter_conversations(_write_datapack(tmp_path, chats), "train"))
+
+    kept = list(filter_identity_disjoint(conversations, excluded_author_ids={"groomer_b"}))
+
+    assert [c.conversation_id for c in kept] == ["clean"]
+
+
+def test_filter_identity_disjoint_passthrough_when_no_excluded_ids(tmp_path):
+    chats = {"c": {"className": "non-predator", "content": [_msg(1, "a", "hi", 0.0, False)]}}
+    conversations = list(iter_conversations(_write_datapack(tmp_path, chats), "train"))
+
+    kept = list(filter_identity_disjoint(conversations, excluded_author_ids=set()))
+
+    assert [c.conversation_id for c in kept] == ["c"]
