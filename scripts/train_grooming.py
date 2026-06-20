@@ -44,6 +44,7 @@ test conversations) and will take a while.
 
 import argparse
 import json
+import os
 import random
 import sys
 from dataclasses import dataclass
@@ -53,8 +54,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import torch
+from dotenv import load_dotenv
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
+
+load_dotenv(Path(__file__).parent.parent / ".env")  # picks up ANTHROPIC_API_KEY (variant C) if present
 
 from risk_detection.conversation import ConversationWindow
 from risk_detection.data.pan12 import (
@@ -66,7 +70,7 @@ from risk_detection.data.pan12 import (
     load_split,
 )
 from risk_detection.model import ConversationEncoder, GroomingHead, MessageEncoder, binary_review_loss
-from risk_detection.signals.llm_safety import LLMSafetySignalExtractor
+from risk_detection.signals.llm_safety import LLMRefusalError, LLMSafetySignalExtractor
 from risk_detection.signals.rules import RuleSignalExtractor
 
 VARIANTS = ("A", "B", "C")
@@ -80,28 +84,58 @@ class CachedLLMSafetyExtractor:
     comparison (Section 6: "LLM features are extracted once and cached
     offline")."""
 
-    def __init__(self, cache_path: Path, extractor: LLMSafetySignalExtractor | None = None):
+    def __init__(
+        self,
+        cache_path: Path,
+        extractor: LLMSafetySignalExtractor | None = None,
+        flush_every: int = 25,
+    ):
         self.cache_path = cache_path
         self.extractor = extractor or LLMSafetySignalExtractor()
+        self.flush_every = flush_every
         self._cache: dict[str, list[float]] = {}
         if cache_path.exists():
             with open(cache_path, "r", encoding="utf-8") as f:
                 self._cache = json.load(f)
         self._dirty = False
+        self._unflushed = 0
+        self.refusal_count = 0
 
     def get(self, key: str, window: ConversationWindow) -> list[float]:
         if key not in self._cache:
-            self._cache[key] = self.extractor.extract(window).to_vector()
+            try:
+                self._cache[key] = self.extractor.extract(window).to_vector()
+            except LLMRefusalError as e:
+                # PAN12 windows can contain explicit or corrupted text that trips
+                # Claude's safety classifiers; fall back to "no signal detected"
+                # (matches the spec's 0 = absent) rather than crashing the run,
+                # and cache it so a retry doesn't re-pay for the same refusal.
+                print(f"  LLM refused {key} (category={e.category}); using zero vector")
+                self._cache[key] = [0.0] * 6
+                self.refusal_count += 1
             self._dirty = True
+            self._unflushed += 1
+            # Each miss is a paid LLM call; flush periodically (not just at
+            # epoch end) so a crash mid-epoch doesn't throw away calls
+            # already paid for and never persisted to disk.
+            if self._unflushed >= self.flush_every:
+                self.save()
         return self._cache[key]
 
     def save(self) -> None:
         if not self._dirty:
             return
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.cache_path, "w", encoding="utf-8") as f:
+        # Write to a sibling temp file and atomically replace the real path,
+        # so a crash mid-write (this runs every `flush_every` paid LLM calls,
+        # not just at epoch end) can never leave a truncated/corrupt cache
+        # file that loses every previously-saved entry on the next load.
+        tmp_path = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(self._cache, f)
+        os.replace(tmp_path, self.cache_path)
         self._dirty = False
+        self._unflushed = 0
 
 
 def build_safety_features(
@@ -140,7 +174,10 @@ def encode_sample(
 
 def save_artifact(obj, output_dir: Path, name: str, timestamp: str, as_json: bool = False) -> None:
     """Same two-tier save convention as scripts/train_cyberbullying.py:
-    an overwritable "latest" copy plus a per-run history copy."""
+    an overwritable "latest" copy plus a per-run history copy. Each write
+    goes to a temp file and is atomically swapped into place, so a crash
+    mid-save can't leave `latest_path` -- which the checkpoint-reload-before-
+    test step reads back -- truncated or corrupted."""
     suffix = "json" if as_json else "pt"
     history_dir = output_dir / name
     history_dir.mkdir(parents=True, exist_ok=True)
@@ -148,13 +185,14 @@ def save_artifact(obj, output_dir: Path, name: str, timestamp: str, as_json: boo
     latest_path = output_dir / f"{name}.{suffix}"
     history_path = history_dir / f"{name}_{timestamp}.{suffix}"
 
-    if as_json:
-        for path in (latest_path, history_path):
-            with open(path, "w", encoding="utf-8") as f:
+    for path in (latest_path, history_path):
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        if as_json:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(obj, f, indent=2)
-    else:
-        torch.save(obj, latest_path)
-        torch.save(obj, history_path)
+        else:
+            torch.save(obj, tmp_path)
+        os.replace(tmp_path, path)
 
 
 @dataclass
@@ -345,6 +383,7 @@ def train_one_variant(
         )
     if llm_cache is not None:
         llm_cache.save()
+        print(f"  LLM refusals this run: {llm_cache.refusal_count} (scored as zero-vector)")
 
 
 def load_samples(

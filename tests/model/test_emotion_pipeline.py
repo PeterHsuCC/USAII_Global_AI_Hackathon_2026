@@ -1,12 +1,17 @@
 from _tiny_emotion_classifier import make_tiny_emotion_classifier
 
-from risk_detection import ConversationWindow, Message
+from risk_detection import ConversationWindow, LLMRefusalError, Message
 from risk_detection.model import EmotionPipeline, EmotionScoreHead, GoEmotionsClassifier
 
 
 class _StubDependencyExtractor:
     def extract(self, window):
         return 0.6
+
+
+class _RefusingDependencyExtractor:
+    def extract(self, window):
+        raise LLMRefusalError(category="bio")
 
 
 def _make_pipeline() -> EmotionPipeline:
@@ -41,4 +46,17 @@ def test_score_on_empty_window_short_circuits():
 
     assert result.emotion_score.item() == 0.0
     assert result.mapped_emotions.shape == (5,)
+    assert result.dependency_signal == 0.0
+
+
+def test_score_falls_back_to_zero_dependency_on_llm_refusal():
+    tokenizer, model = make_tiny_emotion_classifier(hidden_size=8)
+    classifier = GoEmotionsClassifier(tokenizer=tokenizer, encoder=model)
+    head = EmotionScoreHead()
+    pipeline = EmotionPipeline(classifier, head, dependency_extractor=_RefusingDependencyExtractor())
+    window = ConversationWindow(k=5)
+    window.add(Message(speaker_id="a", text="i am scared", relative_time=0.0))
+
+    result = pipeline.score(window)  # must not raise
+
     assert result.dependency_signal == 0.0

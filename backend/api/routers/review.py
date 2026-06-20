@@ -40,7 +40,10 @@ def submit_decision(
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(require_permission(SUBMIT_DECISION)),
 ) -> DecisionOut:
-    case = get_case_for_org(db, case_id, current_user.organization_id)
+    # for_update=True: lock the row for this transaction so a second
+    # concurrent decision on the same case can't both pass the transition
+    # check below against the same stale status (Section 15.4).
+    case = get_case_for_org(db, case_id, current_user.organization_id, for_update=True)
     if case is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Case not found")
 

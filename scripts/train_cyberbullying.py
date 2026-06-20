@@ -52,6 +52,7 @@ terminal while a few steps run to see where you land.
 import argparse
 import csv
 import json
+import os
 import random
 import sys
 from dataclasses import dataclass
@@ -155,13 +156,17 @@ def save_artifact(obj, output_dir: Path, name: str, timestamp: str, as_json: boo
     latest_path = output_dir / f"{name}.{suffix}"
     history_path = history_dir / f"{name}_{timestamp}.{suffix}"
 
-    if as_json:
-        for path in (latest_path, history_path):
-            with open(path, "w", encoding="utf-8") as f:
+    # Each write goes to a temp file and is atomically swapped into place, so
+    # a crash mid-save can't leave `latest_path` -- "point inference code
+    # here", per the docstring above -- truncated or corrupted.
+    for path in (latest_path, history_path):
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        if as_json:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(obj, f, indent=2)
-    else:
-        torch.save(obj, latest_path)
-        torch.save(obj, history_path)
+        else:
+            torch.save(obj, tmp_path)
+        os.replace(tmp_path, path)
 
 
 def build_label_mapping(rows: list[LabeledText], not_bullying_label: str) -> dict[str, int]:

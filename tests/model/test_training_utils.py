@@ -17,7 +17,11 @@ def test_frozen_module_does_not_accumulate_gradients():
     module = nn.Linear(3, 1)
     freeze(module)
 
-    output = module(torch.randn(2, 3))
+    # requires_grad=True on the input (not the frozen params) gives the graph
+    # something to backward through -- without it, output has no grad_fn at
+    # all and backward() fails before it can check the module's own gradients.
+    x = torch.randn(2, 3, requires_grad=True)
+    output = module(x)
     output.sum().backward()
 
     assert module.weight.grad is None

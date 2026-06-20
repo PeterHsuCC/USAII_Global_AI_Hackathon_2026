@@ -4,6 +4,7 @@ import torch
 
 from ...conversation import ConversationWindow
 from ...signals.emotional_dependency import EmotionalDependencyExtractor
+from ...signals.llm_safety import LLMRefusalError
 from ..encoder.aggregation import max_mean_top3
 from .emotion_classifier import GoEmotionsClassifier
 from .emotion_mapping import DEFAULT_LAMBDA, MAPPED_EMOTION_NAMES, map_emotions
@@ -52,7 +53,11 @@ class EmotionPipeline:
             return EmotionResult(g_i.new_zeros(()), zero_m, zero_g, g_i, 0.0)
 
         g_t = max_mean_top3(g_i.transpose(0, 1))  # (d_G,), aggregated per dimension over messages
-        d_t = self.dependency_extractor.extract(window)
+        try:
+            d_t = self.dependency_extractor.extract(window)
+        except LLMRefusalError as e:
+            print(f"  LLM refused emotional-dependency extraction (category={e.category}); using 0.0")
+            d_t = 0.0
         m_t = map_emotions(g_t, self.emotion_classifier.label_to_index, d_t, lam=self.lam)
         s_m = self.emotion_score_head(m_t)
         return EmotionResult(s_m, m_t, g_t, g_i, d_t)

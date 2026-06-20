@@ -4,6 +4,7 @@ import torch
 
 from ...conversation import ConversationWindow
 from ...signals.emotional_dependency import EmotionalDependencyExtractor
+from ...signals.llm_safety import LLMRefusalError
 from ...signals.rule_score import rule_safety_score
 from ...signals.safety_features import SafetyFeatureExtractor, SafetyFeatures
 from ..encoder.aggregation import max_mean_top3
@@ -215,7 +216,11 @@ class IntegratedInferencePipeline:
         # sequentially here but has no data dependency on steps 3/5-9
         g_i = self.emotion_classifier.encode_window(window)
         g_t = max_mean_top3(g_i.transpose(0, 1))
-        d_t = self.dependency_extractor.extract(window)
+        try:
+            d_t = self.dependency_extractor.extract(window)
+        except LLMRefusalError as e:
+            print(f"  LLM refused emotional-dependency extraction (category={e.category}); using 0.0")
+            d_t = 0.0
         m_t = map_emotions(g_t, self.emotion_classifier.label_to_index, d_t, lam=self.lam)
         s_emotion = self.emotion_score_head(m_t)
 

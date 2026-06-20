@@ -168,6 +168,69 @@ def process_job_once(session: Session, job_id: uuid.UUID) -> JobAttemptOutcome:
         return JobAttemptOutcome(status=STATUS_DLQ)
 
 
+def _recover_running_job(session: Session, job_id: uuid.UUID) -> None:
+    """A job found in "running" status at worker startup means its previous
+    attempt was interrupted by a process crash, not a classified failure --
+    process_job_once's `except` block never ran, so attempt_count was
+    already incremented for that lost attempt with no audit/DLQ record of
+    it (the failure path below that normally records *why* an attempt
+    failed only runs for exceptions caught within the same process).
+    Records that now, and routes straight to DLQ if the crash used up the
+    last retry, instead of silently re-queueing with no trace of the
+    lost attempt (Section 8.2's failure handling, applied to a crash)."""
+    job = session.get(AnalysisJob, job_id)
+    if job is None or job.status != "running":
+        return  # already handled by something else
+    case = session.get(Case, job.case_id)
+    if case is None:
+        return
+
+    log.warning(
+        "Job %s found in 'running' status at startup (attempt %d) -- worker crash suspected", job_id, job.attempt_count
+    )
+
+    if job.attempt_count >= settings.max_job_attempts:
+        transition(case, PROCESSING_FAILED)
+        job.status = "failed"
+        session.commit()
+
+        transition(case, DLQ_INVESTIGATION)
+        create_dlq_entry(
+            session,
+            job_id=job.job_id,
+            case_id=case.case_id,
+            failure_stage="inference",
+            error_category="unknown",
+            attempt_count=job.attempt_count,
+            model_version=job.model_version,
+        )
+        record_audit_event(
+            session,
+            actor_id=SYSTEM_ACTOR_ID,
+            actor_role=SYSTEM_ACTOR_ROLE,
+            event_type="dlq_entry_created",
+            case_id=case.case_id,
+        )
+        session.commit()
+        increment("dlq_entry_created")
+        release_concurrent_job_slot(case.submitted_by)
+    else:
+        # Mirror process_job_once's own retry path exactly (case was left at
+        # ANALYZING by the crashed attempt, same as a caught failure would
+        # leave it).
+        transition(case, PROCESSING_FAILED)
+        transition(case, QUEUED)
+        job.status = "queued"
+        record_audit_event(
+            session,
+            actor_id=SYSTEM_ACTOR_ID,
+            actor_role=SYSTEM_ACTOR_ROLE,
+            event_type="job_recovered_after_worker_crash",
+            case_id=case.case_id,
+        )
+        session.commit()
+
+
 class AnalysisJobQueue:
     def __init__(self, session_factory=SessionLocal) -> None:
         self._queue: asyncio.Queue[uuid.UUID] = asyncio.Queue()
@@ -192,8 +255,16 @@ class AnalysisJobQueue:
 
     def replay_unfinished_jobs(self) -> int:
         with self._session_factory() as session:
+            running_ids = session.execute(
+                select(AnalysisJob.job_id).where(AnalysisJob.status == "running")
+            ).scalars().all()
+            for job_id in running_ids:
+                _recover_running_job(session, job_id)
+
+            # Re-query rather than reuse running_ids: recovery above may have
+            # routed some of them to "failed"/DLQ instead of "queued".
             job_ids = session.execute(
-                select(AnalysisJob.job_id).where(AnalysisJob.status.in_(("queued", "running")))
+                select(AnalysisJob.job_id).where(AnalysisJob.status == "queued")
             ).scalars().all()
         for job_id in job_ids:
             self.enqueue(job_id)
