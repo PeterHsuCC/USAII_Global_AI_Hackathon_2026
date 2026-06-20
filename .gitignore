@@ -217,6 +217,10 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# External system layer local SQLite database
+backend/*.db
+backend/*.db-journal
+
 # Datasets (download locally, don't commit -- see scripts/train_cyberbullying.py --help)
 /data/*
 !/data/README.md

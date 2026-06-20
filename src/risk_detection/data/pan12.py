@@ -25,6 +25,8 @@ from ..conversation import ConversationWindow, Message
 GROOMING_LABEL_SOURCE = "pan12_predator_identity"
 DEFAULT_DATAPACK_ID = "PAN12"
 PROBLEM2_FILENAME = "pan12-sexual-predator-identification-groundtruth-problem2.txt"
+TRAIN_PREDATORS_FILENAME = "pan12-sexual-predator-identification-training-corpus-predators-2012-05-01.txt"
+TEST_PREDATORS_FILENAME = "pan12-sexual-predator-identification-groundtruth-problem1.txt"  # Problem 1 = test predators
 
 
 def default_pan12_dir() -> Path:
@@ -76,6 +78,41 @@ def overlapping_predator_ids(
     """
 
     return set(train_predator_ids) & set(test_predator_ids)
+
+
+def default_overlapping_predator_ids(pan12_dir: Path) -> set[str]:
+    """Convenience wrapper: loads both official predator-id lists from
+    `<pan12_dir>/raw_dataset/` and returns their overlap (Section 19.2).
+    Returns an empty set if either file is missing rather than raising,
+    since this is a supplementary check, not required to load PAN12 itself.
+    """
+
+    raw_dir = pan12_dir / "raw_dataset"
+    train_path = raw_dir / TRAIN_PREDATORS_FILENAME
+    test_path = raw_dir / TEST_PREDATORS_FILENAME
+    if not (train_path.exists() and test_path.exists()):
+        return set()
+    return overlapping_predator_ids(load_predator_id_list(train_path), load_predator_id_list(test_path))
+
+
+def filter_identity_disjoint(
+    conversations: Iterable[PAN12Conversation], excluded_author_ids: set[str]
+) -> Iterator[PAN12Conversation]:
+    """Drops conversations involving any of `excluded_author_ids` (Section
+    18.5/19.2): used to build a stricter training pool that excludes the
+    predator identities known to overlap between PAN12's official train
+    and test splits, so a supplementary "identity-disjoint" evaluation can
+    be compared against the official-split result on the same, unchanged
+    official test corpus.
+    """
+
+    if not excluded_author_ids:
+        yield from conversations
+        return
+    for conv in conversations:
+        authors = {m.author_id for m in conv.messages}
+        if authors.isdisjoint(excluded_author_ids):
+            yield conv
 
 
 @dataclass(frozen=True)
