@@ -7,6 +7,7 @@ except ImportError:
 from pydantic import BaseModel
 
 from ..conversation import ConversationWindow
+from .llm_safety import LLMRefusalError
 
 DEFAULT_MODEL = "claude-opus-4-8"
 
@@ -65,4 +66,12 @@ class EmotionalDependencyExtractor:
             messages=[{"role": "user", "content": _format_transcript(window)}],
             output_format=EmotionalDependencySignal,
         )
+        if response.stop_reason == "refusal":
+            category = response.stop_details.category if response.stop_details else None
+            raise LLMRefusalError(category)
+        if response.parsed_output is None:
+            raise RuntimeError(
+                f"LLM returned no parsed output (stop_reason={response.stop_reason!r}); "
+                "cannot extract the emotional-dependency signal for this window"
+            )
         return response.parsed_output.value()

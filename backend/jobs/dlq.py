@@ -17,6 +17,22 @@ PERMANENT = "permanent"
 RESOURCE = "resource"
 UNKNOWN = "unknown"
 
+INVESTIGATING = "investigating"
+REDRIVEN = "redriven"
+RESOLVED_CLOSED = "closed"
+
+
+class DLQEntryAlreadyResolvedError(Exception):
+    """Section 8.3's resolution_status (investigating | redriven | closed)
+    is a one-way state machine: an entry already redriven or closed must not
+    be redriven/closed again (e.g. a double-click, or a slow first request
+    retried by the client). Without this guard, redrive_dlq_entry would
+    happily re-enqueue the job and reset attempt_count a second time."""
+
+    def __init__(self, current: str) -> None:
+        super().__init__(f"DLQ entry already resolved (resolution_status={current!r})")
+        self.current = current
+
 # Section 8.1: only transient/resource failures are retried; permanent and
 # unknown go straight to the DLQ.
 RETRYABLE_CATEGORIES = frozenset({TRANSIENT, RESOURCE})
@@ -79,13 +95,16 @@ def redrive_dlq_entry(session: Session, entry: DLQErrorMetadata) -> AnalysisJob:
     """Section 8.2: 'Correct transient/configuration problem -> Redrive to
     main queue.' Resets attempt_count, giving the job a fresh retry budget
     on the assumption the underlying problem has been fixed."""
+    if entry.resolution_status != INVESTIGATING:
+        raise DLQEntryAlreadyResolvedError(entry.resolution_status)
+
     case = session.get(Case, entry.case_id)
     job = session.get(AnalysisJob, entry.job_id)
 
     transition(case, QUEUED)
     job.status = "queued"
     job.attempt_count = 0
-    entry.resolution_status = "redriven"
+    entry.resolution_status = REDRIVEN
     session.commit()
     return job
 
@@ -94,7 +113,10 @@ def close_dlq_entry_as_invalid(session: Session, entry: DLQErrorMetadata) -> Non
     """Section 8.2: 'Mark input as invalid -> Notify submitting analyst.'
     Notification delivery itself is out of scope here; the case status
     change and audit trail are what this backend is responsible for."""
+    if entry.resolution_status != INVESTIGATING:
+        raise DLQEntryAlreadyResolvedError(entry.resolution_status)
+
     case = session.get(Case, entry.case_id)
     transition(case, CLOSED)
-    entry.resolution_status = "closed"
+    entry.resolution_status = RESOLVED_CLOSED
     session.commit()

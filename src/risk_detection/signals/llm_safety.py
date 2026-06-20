@@ -65,6 +65,20 @@ def _format_transcript(window: ConversationWindow) -> str:
     return "Conversation window:\n" + "\n".join(lines)
 
 
+class LLMRefusalError(Exception):
+    """Raised when Claude declines to score a window (response.stop_reason == "refusal").
+
+    PAN12 windows can contain explicit or corrupted/garbled text that trips
+    Claude's safety classifiers even though the system prompt frames this as
+    a child-safety detection task -- callers must handle this rather than
+    treat `extract()` as always returning a result.
+    """
+
+    def __init__(self, category: str | None):
+        self.category = category
+        super().__init__(f"LLM declined to extract safety signals (refusal category: {category})")
+
+
 class LLMSafetySignalExtractor:
     def __init__(self, client: Any | None = None, model: str = DEFAULT_MODEL):
         if client is None:
@@ -85,4 +99,15 @@ class LLMSafetySignalExtractor:
             messages=[{"role": "user", "content": _format_transcript(window)}],
             output_format=LLMSafetySignals,
         )
+        if response.stop_reason == "refusal":
+            category = response.stop_details.category if response.stop_details else None
+            raise LLMRefusalError(category)
+        if response.parsed_output is None:
+            # e.g. max_tokens truncation before the structured output completed,
+            # or output that failed schema validation -- distinct from a refusal,
+            # so callers shouldn't silently treat it as "no signal" (zero vector).
+            raise RuntimeError(
+                f"LLM returned no parsed output (stop_reason={response.stop_reason!r}); "
+                "cannot extract safety signals for this window"
+            )
         return response.parsed_output

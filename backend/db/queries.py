@@ -14,10 +14,22 @@ from sqlalchemy.orm import Session
 from backend.db.models import AuditLog, Case, User
 
 
-def get_case_for_org(session: Session, case_id: uuid.UUID, organization_id: uuid.UUID) -> Case | None:
-    return session.execute(
-        select(Case).where(Case.case_id == case_id, Case.organization_id == organization_id)
-    ).scalar_one_or_none()
+def get_case_for_org(
+    session: Session, case_id: uuid.UUID, organization_id: uuid.UUID, *, for_update: bool = False
+) -> Case | None:
+    """`for_update=True` row-locks the case for the rest of this transaction
+    (v6 Section 15.4's status-changing decision path needs this so a second
+    concurrent decision on the same case re-reads the post-transition status
+    instead of racing against a stale in-memory read -- see submit_decision).
+    On the documented Postgres deployment this actually blocks the second
+    transaction until the first commits; on the current SQLite substitution
+    (plan decision #4) it is accepted by the SQLite dialect but does not
+    enforce row-level locking, so this is correct for production but not a
+    complete guarantee under the current SQLite deployment."""
+    stmt = select(Case).where(Case.case_id == case_id, Case.organization_id == organization_id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    return session.execute(stmt).scalar_one_or_none()
 
 
 def list_cases_for_org(

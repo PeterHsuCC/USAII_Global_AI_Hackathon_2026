@@ -9,7 +9,11 @@ sequence number went stale and the next audit write collided on the
 sequence_number UNIQUE constraint. Re-deriving from the DB avoids that;
 the lock still prevents two threads *within this process* (the request
 thread and the background job-worker thread) from racing between the
-read and the insert.
+read and the insert -- which requires this function to commit before
+releasing the lock (see below), since every caller uses its own session
+and an uncommitted flush on one connection is invisible to a concurrent
+reader on another; releasing the lock any earlier would let a second
+thread read the same "last row" and fork the chain.
 
 This still assumes one writer process at a time in practice -- two
 processes truly racing at the database level could still collide -- but
@@ -101,6 +105,13 @@ def record_audit_event(
         )
         session.add(row)
         session.flush()
+        # Commit while still holding the lock -- every caller invokes this as
+        # its last step before its own (now redundant, harmless) commit, so
+        # this doesn't change any caller's atomicity. See the module
+        # docstring: without this, a second thread could acquire the lock,
+        # read the same not-yet-committed "last row" from its own session,
+        # and fork the chain.
+        session.commit()
         return row
 
 
