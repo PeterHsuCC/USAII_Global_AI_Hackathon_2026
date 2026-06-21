@@ -20,6 +20,22 @@ def test_redacts_phone_number():
     assert "PHONE" in result.categories_found
 
 
+def test_redacts_bare_phone_number_with_no_separators():
+    # Exactly the format someone fires off mid-chat with no punctuation --
+    # previously matched none of the four patterns and leaked unredacted.
+    result = redact_text("text me 5551234567 ok")
+    assert "[REDACTED_PHONE]" in result.redacted_text
+    assert "5551234567" not in result.redacted_text
+    assert "PHONE" in result.categories_found
+
+
+def test_redacts_bare_phone_number_with_country_code():
+    result = redact_text("its 15551234567 call anytime")
+    assert "[REDACTED_PHONE]" in result.redacted_text
+    assert "15551234567" not in result.redacted_text
+    assert "PHONE" in result.categories_found
+
+
 def test_redacts_handle():
     result = redact_text("add me on @cool_user99 later")
     assert "[REDACTED_HANDLE]" in result.redacted_text

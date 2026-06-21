@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 
 import backend.seed as seed_module
 from backend.api.deps import get_db
+from backend.config import settings
+from backend.db.models import User
 from backend.jobs import queue as queue_module
 from backend.model_runtime import loader as loader_module
 from backend.monitoring import metrics
@@ -135,6 +137,51 @@ def test_cross_org_case_access_denied(client: TestClient):
 def test_unauthenticated_request_rejected(client: TestClient):
     response = client.get("/cases")
     assert response.status_code == 401
+
+
+def test_submit_case_releases_concurrency_slot_on_mid_request_failure(client: TestClient, db_sessionmaker, monkeypatch):
+    """acquire_concurrent_job_slot is taken before any job exists; if
+    something between that and the commit fails, the slot must be released
+    there too, or it leaks (capped at rate_limit_concurrent_jobs_per_analyst)
+    until the analyst can never submit again."""
+    analyst_headers = _login(client, ANALYST_LOGIN)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated failure during preprocessing")
+
+    monkeypatch.setattr("backend.api.routers.cases.prepare_conversation", _raise)
+    with pytest.raises(RuntimeError):
+        client.post("/cases", json={"messages": [{"speaker": "A", "text": "hello"}]}, headers=analyst_headers)
+    monkeypatch.undo()
+
+    with db_sessionmaker() as session:
+        analyst_id = session.query(User).filter_by(email=ANALYST_LOGIN["email"]).one().user_id
+
+    # If the failed submission's slot leaked, this would raise before the
+    # full per-analyst concurrency limit is reached.
+    for _ in range(settings.rate_limit_concurrent_jobs_per_analyst):
+        limiter.acquire_concurrent_job_slot(analyst_id)
+
+
+def test_validation_error_does_not_echo_raw_submitted_content(client: TestClient):
+    """FastAPI's default 422 handler echoes each rejected field's raw
+    `input` value back in the response body. For a missing required field
+    (e.g. a message sent with no `speaker`), Pydantic's `input` for that
+    error is the *whole sibling dict* -- including the message's real
+    `text` -- not just the missing field. main.py overrides the handler so
+    this never reaches the client unredacted."""
+    analyst_headers = _login(client, ANALYST_LOGIN)
+    secret_text = "my home address is 123 Secret Lane, call me at 555-000-1111"
+
+    response = client.post(
+        "/cases",
+        json={"messages": [{"text": secret_text}]},  # "speaker" omitted
+        headers=analyst_headers,
+    )
+    assert response.status_code == 422
+    assert secret_text not in response.text
+    for error in response.json()["detail"]:
+        assert "input" not in error
 
 
 def test_invalid_decision_type_rejected_by_schema(client: TestClient):

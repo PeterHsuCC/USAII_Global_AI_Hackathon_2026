@@ -9,7 +9,9 @@ from contextlib import asynccontextmanager
 
 import backend.paths  # noqa: F401 -- must run before any risk_detection import
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from backend.api.routers import admin, audit, auth, cases, review
 from backend.config import settings
@@ -57,6 +59,18 @@ async def request_id_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     return response
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """FastAPI's default 422 handler echoes each rejected field's raw
+    `"input"` value back in the response body -- for POST /cases, that can
+    be the unredacted conversation text the analyst just submitted (a
+    sibling field failing validation, e.g. a bad timestamp, still surfaces
+    the message text next to it in the same error list). Strip `input`
+    from every error entry before it leaves the server."""
+    sanitized = [{k: v for k, v in error.items() if k != "input"} for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": sanitized})
 
 
 app.include_router(auth.router)

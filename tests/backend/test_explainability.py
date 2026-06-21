@@ -1,3 +1,7 @@
+import json
+
+import torch
+
 from backend.explainability.service import MANDATORY_DISCLAIMER, build_explainability
 from backend.model_runtime.job_runner import JobMessage, risk_level_from_score, run_analysis
 
@@ -69,10 +73,28 @@ def test_data_limitations_include_preprocessing_flags_passed_in():
 
 
 def test_to_json_round_trips():
-    import json
-
     outcome, messages_by_sequence = _run()
     output = build_explainability(outcome, messages_by_sequence=messages_by_sequence, risk_level="medium")
     parsed = json.loads(output.to_json())
     assert parsed["disclaimer"] == MANDATORY_DISCLAIMER
     assert "rule_evidence" in parsed
+
+
+def test_non_finite_uncertainty_is_sanitized_to_fail_safe_values():
+    """NaN must never reach the API response: it compares False against
+    every human_review_required threshold (e.g. confidence < threshold), so
+    an unnoticed NaN would silently bypass the review trigger rather than
+    visibly fail safe."""
+    outcome, messages_by_sequence = _run()
+    outcome.result.uncertainty_estimate.confidence = torch.tensor(float("nan"))
+    outcome.result.uncertainty_estimate.uncertainty = torch.tensor(float("nan"))
+    outcome.result.uncertainty_estimate.variance = torch.tensor(float("nan"))
+
+    output = build_explainability(outcome, messages_by_sequence=messages_by_sequence, risk_level="medium")
+
+    assert output.confidence_and_uncertainty.confidence == 0.0
+    assert output.confidence_and_uncertainty.uncertainty == 1.0
+    assert output.confidence_and_uncertainty.mc_dropout_variance == 0.25
+
+    parsed = json.loads(output.to_json())
+    assert parsed["confidence_and_uncertainty"]["confidence"] == 0.0

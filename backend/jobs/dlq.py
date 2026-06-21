@@ -80,15 +80,21 @@ def create_dlq_entry(
     return entry
 
 
-def open_dlq_depth(session: Session) -> int:
-    return session.execute(
-        select(func.count()).select_from(DLQErrorMetadata).where(DLQErrorMetadata.resolution_status == "investigating")
-    ).scalar_one()
+def open_dlq_depth(session: Session, *, organization_id: uuid.UUID | None = None) -> int:
+    """organization_id=None (the default) counts across every tenant -- the
+    correct scope for the platform-ops alert in process_job_once (Section
+    12.1: "Platform operations team"). The per-org admin endpoints
+    (/admin/metrics, /admin/dlq) must instead pass their caller's
+    organization_id, or this leaks another tenant's failure-volume signal."""
+    stmt = select(func.count()).select_from(DLQErrorMetadata).where(DLQErrorMetadata.resolution_status == "investigating")
+    if organization_id is not None:
+        stmt = stmt.join(Case, Case.case_id == DLQErrorMetadata.case_id).where(Case.organization_id == organization_id)
+    return session.execute(stmt).scalar_one()
 
 
-def is_over_alert_threshold(session: Session) -> bool:
+def is_over_alert_threshold(session: Session, *, organization_id: uuid.UUID | None = None) -> bool:
     """Section 8.4: alert when DLQ depth exceeds a configurable threshold."""
-    return open_dlq_depth(session) > settings.dlq_alert_threshold
+    return open_dlq_depth(session, organization_id=organization_id) > settings.dlq_alert_threshold
 
 
 def redrive_dlq_entry(session: Session, entry: DLQErrorMetadata) -> AnalysisJob:

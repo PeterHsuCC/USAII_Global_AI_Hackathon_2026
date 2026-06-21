@@ -35,7 +35,13 @@ from backend.jobs.queue import job_queue
 from backend.model_runtime.loader import PREPROCESSING_VERSION, RULE_VERSION, current_model_version
 from backend.monitoring.metrics import increment
 from backend.preprocessing.anonymize import RawMessage, prepare_conversation
-from backend.rate_limit.limiter import RateLimitExceeded, acquire_concurrent_job_slot, check_job_submission, check_read
+from backend.rate_limit.limiter import (
+    RateLimitExceeded,
+    acquire_concurrent_job_slot,
+    check_job_submission,
+    check_read,
+    release_concurrent_job_slot,
+)
 
 router = APIRouter(prefix="/cases", tags=["cases"])
 
@@ -60,67 +66,77 @@ def submit_case(
     except RateLimitExceeded as exc:
         raise _retry_after_response(exc) from exc
 
-    retention_until = date.today() + timedelta(days=settings.redacted_conversation_retention_days)
+    # acquire_concurrent_job_slot is normally released by process_job_once
+    # once a queued job reaches a terminal state -- but no job exists yet
+    # at this point, so any failure before it's queued (a bad payload,
+    # a DB error on commit, ...) must release the slot itself, or it leaks
+    # until process restart (bounded by rate_limit_concurrent_jobs_per_analyst,
+    # so the analyst is eventually locked out of submitting anything).
+    try:
+        retention_until = date.today() + timedelta(days=settings.redacted_conversation_retention_days)
 
-    case = Case(
-        organization_id=current_user.organization_id,
-        submitted_by=current_user.user_id,
-        status=SUBMITTED,
-        priority=payload.priority,
-        source_type="api",
-        retention_until=retention_until,
-    )
-    db.add(case)
-    db.flush()
-
-    transition(case, VALIDATING)
-
-    raw_messages = [
-        RawMessage(speaker_external_id=m.speaker, text=m.text, timestamp=m.timestamp) for m in payload.messages
-    ]
-    prepared = prepare_conversation(raw_messages)
-
-    transition(case, PRIVACY_PROCESSING)
-
-    conversation = Conversation(
-        case_id=case.case_id,
-        preprocessing_limitations_json=json.dumps(list(prepared.data_limitations)),
-    )
-    db.add(conversation)
-    db.flush()
-
-    for msg in prepared.messages:
-        db.add(
-            CaseMessage(
-                case_id=case.case_id,
-                conversation_id=conversation.conversation_id,
-                message_sequence=msg.message_sequence,
-                speaker_local_id=msg.speaker_local_id,
-                redacted_content=msg.redacted_content,
-                retention_until=retention_until,
-            )
+        case = Case(
+            organization_id=current_user.organization_id,
+            submitted_by=current_user.user_id,
+            status=SUBMITTED,
+            priority=payload.priority,
+            source_type="api",
+            retention_until=retention_until,
         )
+        db.add(case)
+        db.flush()
 
-    job = AnalysisJob(
-        case_id=case.case_id,
-        status="queued",
-        model_version=current_model_version(),
-        rule_version=RULE_VERSION,
-        preprocessing_version=PREPROCESSING_VERSION,
-    )
-    db.add(job)
+        transition(case, VALIDATING)
 
-    transition(case, QUEUED)
+        raw_messages = [
+            RawMessage(speaker_external_id=m.speaker, text=m.text, timestamp=m.timestamp) for m in payload.messages
+        ]
+        prepared = prepare_conversation(raw_messages)
 
-    record_audit_event(
-        db,
-        actor_id=current_user.user_id,
-        actor_role=current_user.role,
-        event_type="case_submitted",
-        case_id=case.case_id,
-        request_id=new_request_id(),
-    )
-    db.commit()
+        transition(case, PRIVACY_PROCESSING)
+
+        conversation = Conversation(
+            case_id=case.case_id,
+            preprocessing_limitations_json=json.dumps(list(prepared.data_limitations)),
+        )
+        db.add(conversation)
+        db.flush()
+
+        for msg in prepared.messages:
+            db.add(
+                CaseMessage(
+                    case_id=case.case_id,
+                    conversation_id=conversation.conversation_id,
+                    message_sequence=msg.message_sequence,
+                    speaker_local_id=msg.speaker_local_id,
+                    redacted_content=msg.redacted_content,
+                    retention_until=retention_until,
+                )
+            )
+
+        job = AnalysisJob(
+            case_id=case.case_id,
+            status="queued",
+            model_version=current_model_version(),
+            rule_version=RULE_VERSION,
+            preprocessing_version=PREPROCESSING_VERSION,
+        )
+        db.add(job)
+
+        transition(case, QUEUED)
+
+        record_audit_event(
+            db,
+            actor_id=current_user.user_id,
+            actor_role=current_user.role,
+            event_type="case_submitted",
+            case_id=case.case_id,
+            request_id=new_request_id(),
+        )
+        db.commit()
+    except Exception:
+        release_concurrent_job_slot(current_user.user_id)
+        raise
     increment("case_submitted")
 
     job_queue.enqueue(job.job_id)
