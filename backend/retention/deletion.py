@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.audit.service import SYSTEM_ACTOR_ID, SYSTEM_ACTOR_ROLE, record_audit_event
-from backend.db.models import Case, CaseMessage
+from backend.db.models import Case, CaseMessage, Result
 
 
 def run_retention_sweep(
@@ -48,6 +48,17 @@ def run_retention_sweep(
         messages = session.execute(select(CaseMessage).where(CaseMessage.case_id == case.case_id)).scalars().all()
         for message in messages:
             session.delete(message)
+
+        # Doc's deletion flow also calls for "derived temporary artifacts" to
+        # be removed alongside conversation content -- evidence_json embeds
+        # redacted_evidence_span (Section 9), an actual conversation-text
+        # snippet, into each Result row. Clear just that field; the rest of
+        # the row (risk_level, confidence, model_version, ...) is metadata,
+        # not content, and is kept for the same accountability reasons
+        # AnalystDecision rows are.
+        results = session.execute(select(Result).where(Result.case_id == case.case_id)).scalars().all()
+        for result in results:
+            result.evidence_json = None
 
         deleted += 1
         record_audit_event(

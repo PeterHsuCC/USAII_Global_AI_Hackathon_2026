@@ -26,9 +26,11 @@ dedicated encoder pair via `grooming_message_encoder`/
 `grooming_conversation_encoder` and slices the live safety-feature vector
 down to GroomingHead.safety_dim itself (see its _grooming_safety_tensor),
 so this loader only needs to build+load the matching checkpoint trio.
-Variant C (LLM-augmented) was never trained -- no ANTHROPIC_API_KEY was
-available -- so it has no checkpoint to load; REAL_MODE_EXTRA_LIMITATION
-below surfaces that gap explicitly.
+Variant C (LLM-augmented) has only been smoke-tested on a 300-conversation
+PAN12 subset (Section 6), not the full corpus -- that checkpoint exists on
+disk (trained_weights/grooming_*_C.pt) but isn't production-grade, so it
+is deliberately not loaded here; REAL_MODE_EXTRA_LIMITATION below surfaces
+that gap explicitly.
 
 HistoricalStateUpdater/EarlyWarningTracker are deliberately NOT built here:
 they are per-conversation state, and a global instance would leak risk
@@ -65,9 +67,10 @@ PREPROCESSING_VERSION = "preprocessing-v1"
 
 REAL_MODE_EXTRA_LIMITATION = (
     "Grooming score uses Variant B's trained checkpoint (text + rule-based "
-    "safety signals only, safety_dim=5): the LLM-augmented Variant C was "
-    "never trained because no ANTHROPIC_API_KEY was available at training "
-    "time, and the underlying label is PAN12's predator-identity-derived weak "
+    "safety signals only, safety_dim=5): the LLM-augmented Variant C has only "
+    "been smoke-tested on a 300-conversation PAN12 subset (Section 6), not the "
+    "full corpus, so its checkpoint is not production-grade and is not loaded "
+    "here; the underlying label is also PAN12's predator-identity-derived weak "
     "label, not a direct grooming annotation (Section 6)."
 )
 

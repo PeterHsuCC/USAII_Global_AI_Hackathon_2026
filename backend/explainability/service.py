@@ -9,9 +9,20 @@ documented here rather than left as undocumented magic numbers.
 """
 
 import json
+import math
 from dataclasses import asdict, dataclass
 
 from backend.model_runtime.job_runner import AnalysisOutcome
+
+
+def _finite_or(value: float, fallback: float) -> float:
+    """NaN/Inf must never reach the API response: NaN compares False against
+    every threshold (e.g. `confidence < confidence_threshold` in
+    human_review_required), so an unnoticed NaN would silently evade the
+    human-review trigger rather than visibly fail safe. Substituting the
+    most-uncertain value here means a non-finite result always reads as
+    "treat this as maximally uncertain", not as a confident answer."""
+    return value if math.isfinite(value) else fallback
 
 ATTENTION_DISCLAIMER = (
     "Attention weights indicate which messages the model focused on. They "
@@ -157,9 +168,9 @@ def build_explainability(
     uncertainty = outcome.result.uncertainty_estimate
     confidence_and_uncertainty = ConfidenceAndUncertainty(
         risk_level=risk_level,
-        confidence=float(uncertainty.confidence.item()),
-        uncertainty=float(uncertainty.uncertainty.item()),
-        mc_dropout_variance=float(uncertainty.variance.item()),
+        confidence=_finite_or(float(uncertainty.confidence.item()), 0.0),
+        uncertainty=_finite_or(float(uncertainty.uncertainty.item()), 1.0),
+        mc_dropout_variance=_finite_or(float(uncertainty.variance.item()), 0.25),
     )
 
     data_limitations = tuple(outcome.result.limitations) + outcome.extra_limitations + preprocessing_limitations

@@ -53,9 +53,16 @@ def mc_dropout_stats(
     does not represent uncertainty in a frozen, non-dropout component
     (e.g. a frozen GoEmotions classifier with dropout disabled) unless
     that component is also put into MC Dropout mode.
+
+    Requires n >= 2: a single sample has zero spread by construction, so
+    n=1 would silently report confidence=1.0 regardless of how stochastic
+    the underlying model actually is.
     """
-    if n < 1:
-        raise ValueError("n must be >= 1")
+    if n < 2:
+        # n=1 isn't just imprecise -- variance is exactly 0.0 by construction
+        # (a single sample has no spread), silently reporting confidence=1.0
+        # regardless of how stochastic the underlying model actually is.
+        raise ValueError("n must be >= 2 for variance to be statistically meaningful")
 
     with torch.no_grad():
         samples = torch.stack([predict_fn() for _ in range(n)], dim=0)  # (n, ...)

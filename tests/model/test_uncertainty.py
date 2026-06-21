@@ -69,6 +69,15 @@ def test_mc_dropout_stats_rejects_invalid_n():
         mc_dropout_stats(lambda: torch.tensor(0.5), n=0)
 
 
+def test_mc_dropout_stats_rejects_n_of_one():
+    # n=1 isn't just imprecise: variance is exactly 0.0 by construction (a
+    # single sample has no spread), so confidence=1.0 would be reported
+    # regardless of how stochastic the model actually is. Must raise rather
+    # than silently produce that false-confidence result.
+    with pytest.raises(ValueError):
+        mc_dropout_stats(lambda: torch.tensor(0.5), n=1)
+
+
 def test_enable_mc_dropout_only_activates_dropout_layers():
     module = nn.Sequential(nn.Linear(4, 4), nn.Dropout(0.5), nn.Linear(4, 1))
     module.eval()

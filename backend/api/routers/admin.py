@@ -53,7 +53,10 @@ def list_dlq_entries(
         .where(Case.organization_id == current_user.organization_id, DLQErrorMetadata.resolution_status == "investigating")
         .order_by(DLQErrorMetadata.last_failure_at)
     ).scalars().all()
-    return DLQListResponse(entries=[DLQEntryOut.model_validate(e) for e in entries], alert=is_over_alert_threshold(db))
+    return DLQListResponse(
+        entries=[DLQEntryOut.model_validate(e) for e in entries],
+        alert=is_over_alert_threshold(db, organization_id=current_user.organization_id),
+    )
 
 
 @router.post("/dlq/{dlq_id}/redrive", response_model=DLQEntryOut)
@@ -90,7 +93,7 @@ def metrics(
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(require_permission(MAINTAIN_PLATFORM)),
 ) -> MetricsResponse:
-    return MetricsResponse(counters=snapshot(), open_dlq_depth=open_dlq_depth(db))
+    return MetricsResponse(counters=snapshot(), open_dlq_depth=open_dlq_depth(db, organization_id=current_user.organization_id))
 
 
 @router.post("/retention/run", response_model=RetentionSweepResponse)
