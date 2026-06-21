@@ -72,6 +72,31 @@ def test_detects_threat_phrase_gonna_and_will_phrasings():
         assert signals.threat_phrase is True, text
 
 
+def test_detects_threat_phrase_with_filler_words_before_hurt_or_kill():
+    """A real demo case used "I will get you and kill you" -- the verb
+    doesn't always immediately follow the modal."""
+    for text in (
+        "i will get you and kill you",
+        "i'll come and hurt you",
+        "i am going to really hurt you",
+    ):
+        window = _window(text)
+        signals = RuleSignalExtractor().extract(window)
+
+        assert signals.threat_phrase is True, text
+
+
+def test_threat_phrase_find_you_stays_strict_to_avoid_false_positives():
+    """Unlike hurt/kill, "find" is not given filler-word tolerance: "find
+    you" is a common benign phrase ("I'll find you a seat"), so widening it
+    the same way would trade a narrow miss for a much broader false-positive
+    surface."""
+    window = _window("i will try to find you at the party")
+    signals = RuleSignalExtractor().extract(window)
+
+    assert signals.threat_phrase is False
+
+
 def test_evidence_records_every_triggering_message_for_a_rule():
     window = _window(
         "send me a pic",  # index 0: image_request

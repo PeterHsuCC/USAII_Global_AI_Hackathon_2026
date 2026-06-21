@@ -29,9 +29,15 @@ _IMAGE_REQUEST = re.compile(
     r"\b(send (me )?(a )?(pic|picture|photo|selfie)|send nudes|video call|show me your)\b",
     re.IGNORECASE,
 )
+_THREAT_MODAL = r"i(?:'ll|(?:'m| am)? (?:going to|gonna|will))"
 _THREAT_PHRASE = re.compile(
-    r"\b(i'?ll (hurt|kill|find) you|"
-    r"i(?:'m| am)? (?:going to|gonna|will) (hurt|kill|find) you|"
+    # hurt/kill allow up to 3 filler words between the modal and the verb
+    # (e.g. "I will get you and kill you") -- find is kept strict
+    # (immediately after the modal, no filler) since "find you" is a common
+    # benign phrase ("I'll find you a seat") and widening it the same way
+    # would trade a narrow miss for a much broader false-positive surface.
+    rf"\b({_THREAT_MODAL}(?:\s+\w+){{0,3}}\s+(hurt|kill) you|"
+    rf"{_THREAT_MODAL} find you|"
     r"or else|you'?ll regret|i know where you live)\b",
     re.IGNORECASE,
 )

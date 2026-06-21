@@ -55,7 +55,7 @@ import json
 import os
 import random
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -102,6 +102,73 @@ def load_dailydialog_negatives(not_bullying_label: str, max_count: int | None) -
             if max_count is not None and len(rows) >= max_count:
                 return rows
     return rows
+
+
+_GOEMOTIONS_NEGATIVE_EMOTION_COLUMNS = (
+    "anger",
+    "annoyance",
+    "disapproval",
+    "disgust",
+    "fear",
+    "grief",
+    "embarrassment",
+    "nervousness",
+    "remorse",
+    "sadness",
+)
+
+
+def load_goemotions_negatives(not_bullying_label: str, max_count: int | None) -> list[LabeledText]:
+    """Reddit comments (not Twitter) labeled purely `neutral` -- no other
+    GoEmotions label active, including the negative-emotion columns above
+    -- as additional benign negatives. Added 2026-06-21 as a working
+    alternative to load_dailydialog_negatives() above: DailyDialog is a
+    script-based HF dataset, and `datasets` >= 5.0 (installed here) dropped
+    script support entirely, so --use-dailydialog now fails outright with
+    "Dataset scripts are no longer supported" -- caught via a real attempt
+    to run it, not assumed. SetFit/go_emotions is a plain Parquet mirror, so
+    it isn't exposed to the same failure mode."""
+    from datasets import load_dataset
+
+    dataset = load_dataset("SetFit/go_emotions", split="train")
+    rows = []
+    for item in dataset:
+        if item["neutral"] != 1:
+            continue
+        if any(item[col] for col in _GOEMOTIONS_NEGATIVE_EMOTION_COLUMNS):
+            continue
+        text = item["text"].strip()
+        if text:
+            rows.append(LabeledText(text=text, label=not_bullying_label))
+        if max_count is not None and len(rows) >= max_count:
+            return rows
+    return rows
+
+
+def filter_out_rule_matches(rows: list[LabeledText]) -> list[LabeledText]:
+    """Drops any augmentation row whose text matches one of this project's
+    own deterministic safety rules (Section 3.3/10.1) -- an upstream
+    dataset's "neutral emotion" label is not the same claim as "safe to
+    teach the Cyberbullying Head as a not_cyberbullying example"; a calmly-
+    worded threat or contact-migration request could still slip through
+    emotion labeling. Cheap (regex-only), so applied to every augmentation
+    row regardless of source."""
+    from risk_detection.conversation import ConversationWindow, Message
+    from risk_detection.signals.rules import RuleSignalExtractor
+
+    extractor = RuleSignalExtractor()
+    kept = []
+    dropped = 0
+    for row in rows:
+        window = ConversationWindow(k=1)
+        window.add(Message(speaker_id="user", text=row.text, relative_time=0.0))
+        if any(extractor.extract(window).to_vector()):
+            dropped += 1
+            continue
+        kept.append(row)
+    if dropped:
+        print(f"  filtered out {dropped} augmentation row(s) matching an existing safety rule")
+    return kept
 
 
 def freeze_encoder_layers(message_encoder: MessageEncoder, num_layers: int) -> None:
@@ -261,6 +328,14 @@ def main() -> None:
     )
     parser.add_argument("--dailydialog-negative-count", type=int, default=5000)
     parser.add_argument(
+        "--use-goemotions",
+        action="store_true",
+        help="Also pull benign negative examples from SetFit/go_emotions (Reddit, not "
+        "Twitter) -- a working alternative to --use-dailydialog, which now fails "
+        "outright under datasets>=5.0 (script-based datasets are no longer supported).",
+    )
+    parser.add_argument("--goemotions-negative-count", type=int, default=5000)
+    parser.add_argument(
         "--max-examples",
         type=int,
         default=None,
@@ -296,14 +371,30 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    # Computed early (not just before the training loop, as in earlier
+    # versions of this script) so any augmentation data pulled in below can
+    # be saved under the same run identifier as the checkpoints it produced.
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
     print(f"Loading {args.cyberbullying_csv} ...")
     rows = load_kaggle_csv(args.cyberbullying_csv, args.text_column, args.label_column)
     print(f"  {len(rows)} labeled tweets loaded")
 
     if args.use_dailydialog:
         print("Loading DailyDialog negatives ...")
-        rows += load_dailydialog_negatives(args.not_bullying_label, args.dailydialog_negative_count)
-        print(f"  total rows after adding DailyDialog: {len(rows)}")
+        dailydialog_rows = load_dailydialog_negatives(args.not_bullying_label, args.dailydialog_negative_count)
+        rows += dailydialog_rows
+        save_artifact([asdict(r) for r in dailydialog_rows], args.output_dir, "dailydialog_negatives", run_timestamp, as_json=True)
+        print(f"  total rows after adding DailyDialog: {len(rows)} (saved to {args.output_dir}/dailydialog_negatives.json)")
+
+    if args.use_goemotions:
+        print("Loading GoEmotions (Reddit) negatives ...")
+        negatives = load_goemotions_negatives(args.not_bullying_label, args.goemotions_negative_count)
+        negatives = filter_out_rule_matches(negatives)
+        rows += negatives
+        save_artifact([asdict(r) for r in negatives], args.output_dir, "goemotions_negatives", run_timestamp, as_json=True)
+        print(f"  total rows after adding GoEmotions: {len(rows)} (saved to {args.output_dir}/goemotions_negatives.json)")
 
     random.shuffle(rows)
     if args.max_examples is not None:
@@ -353,8 +444,6 @@ def main() -> None:
     print(f"Trainable parameters: {num_trainable:,} / {num_total:,}")
     optimizer = optim.AdamW(params, lr=args.lr)
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     best_val_loss = float("inf")
 
     for epoch in range(args.epochs):

@@ -8,7 +8,20 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from backend.paths import PROJECT_ROOT
+
+# Mirrors scripts/train_grooming.py's own load_dotenv call. Without this,
+# ANTHROPIC_API_KEY (and anything else only set in .env, not the real shell
+# environment) is invisible to the backend process -- LLMSafetySignalExtractor/
+# EmotionalDependencyExtractor construct `anthropic.Anthropic()` with no
+# explicit api_key, which reads os.environ directly, so a case submitted in
+# real mode failed with "Could not resolve authentication method" even
+# though `.env` had the key (caught via a live real-mode test, not assumed).
+# Must run before Settings() below, since its fields read os.environ at
+# construction time.
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 def _env_int(name: str, default: int) -> int:
