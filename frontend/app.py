@@ -175,7 +175,11 @@ def render_submit_case() -> None:
     st.subheader("Submit a New Case")
 
     input_mode = st.radio(
-        "Input Mode", ["Conversation", "Single Text / Letter"], horizontal=True, key="submit_input_mode"
+        "Input Mode",
+        ["Conversation", "Single Text / Letter"],
+        horizontal=True,
+        key="submit_input_mode",
+        on_change=lambda: st.session_state.update(conversation_input=""),
     )
     priority = st.selectbox("Priority", ["standard", "urgent"], key="submit_priority")
 

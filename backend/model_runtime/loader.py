@@ -131,6 +131,13 @@ _STUB_VOCAB = (
 
 _STUB_EMOTION_LABELS = ("admiration", "fear", "nervousness", "grief", "sadness", "anger", "caring", "love", "neutral")
 
+# Must match the max_length passed to MessageEncoder/GoEmotionsClassifier in
+# _load_stub below -- otherwise a message that tokenizes past this many
+# tokens overflows the tiny model's position-embedding table instead of
+# being truncated first, e.g. "size of tensor a (97) must match the size
+# of tensor b (32)".
+_STUB_MAX_POSITION_EMBEDDINGS = 32
+
 
 def _build_stub_bert(hidden_size: int) -> tuple[BertTokenizer, BertModel]:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
@@ -144,7 +151,7 @@ def _build_stub_bert(hidden_size: int) -> tuple[BertTokenizer, BertModel]:
         num_hidden_layers=1,
         num_attention_heads=1,
         intermediate_size=16,
-        max_position_embeddings=32,
+        max_position_embeddings=_STUB_MAX_POSITION_EMBEDDINGS,
     )
     model = BertModel(config)
     model.eval()
@@ -163,7 +170,7 @@ def _build_stub_emotion_classifier(hidden_size: int) -> tuple[BertTokenizer, Ber
         num_hidden_layers=1,
         num_attention_heads=1,
         intermediate_size=16,
-        max_position_embeddings=32,
+        max_position_embeddings=_STUB_MAX_POSITION_EMBEDDINGS,
         num_labels=len(_STUB_EMOTION_LABELS),
         id2label={i: label for i, label in enumerate(_STUB_EMOTION_LABELS)},
         label2id={label: i for i, label in enumerate(_STUB_EMOTION_LABELS)},
@@ -179,11 +186,15 @@ def _load_stub(hidden_size: int = 8) -> ModelComponents:
     emo_tokenizer, emo_model = _build_stub_emotion_classifier(hidden_size)
 
     return ModelComponents(
-        message_encoder=MessageEncoder(tokenizer=tokenizer, encoder=bert),
+        message_encoder=MessageEncoder(
+            tokenizer=tokenizer, encoder=bert, max_length=_STUB_MAX_POSITION_EMBEDDINGS
+        ),
         conversation_encoder=ConversationEncoder(d=hidden_size),
         cyberbullying_head=CyberbullyingHead(d=hidden_size, d_z=hidden_size),
         grooming_head=GroomingHead(d_z=hidden_size, safety_dim=11),
-        emotion_classifier=GoEmotionsClassifier(tokenizer=emo_tokenizer, encoder=emo_model),
+        emotion_classifier=GoEmotionsClassifier(
+            tokenizer=emo_tokenizer, encoder=emo_model, max_length=_STUB_MAX_POSITION_EMBEDDINGS
+        ),
         emotion_score_head=EmotionScoreHead(),
         risk_fusion=PrototypeRiskFusion(),
         safety_feature_extractor=SafetyFeatureExtractor(

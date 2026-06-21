@@ -30,7 +30,9 @@ _IMAGE_REQUEST = re.compile(
     re.IGNORECASE,
 )
 _THREAT_PHRASE = re.compile(
-    r"\b(i'?ll (hurt|kill|find) you|or else|you'?ll regret|i know where you live)\b",
+    r"\b(i'?ll (hurt|kill|find) you|"
+    r"i(?:'m| am)? (?:going to|gonna|will) (hurt|kill|find) you|"
+    r"or else|you'?ll regret|i know where you live)\b",
     re.IGNORECASE,
 )
 
