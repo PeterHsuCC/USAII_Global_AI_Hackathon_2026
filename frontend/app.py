@@ -17,6 +17,25 @@ st.set_page_config(
 
 DEFAULT_API_BASE_URL = os.environ.get("RISK_PLATFORM_API_URL", "http://localhost:8000")
 
+# Soft guideline only: approximately the real-mode text/emotion encoders'
+# 128-token budget per message. Past this, the message is still accepted
+# and analyzed -- the LLM signal extractor and rule engine still see it in
+# full, and the explainability service's data_limitations will say so if the
+# encoders truncated it -- so this only warns, it never blocks submission.
+SOFT_MESSAGE_LENGTH_WARNING = 400
+
+# Hard ceilings: must match backend/api/schemas.py's MAX_MESSAGE_TEXT_LENGTH /
+# MAX_MESSAGES_PER_CASE -- duplicated rather than imported since the
+# frontend only talks to the backend over HTTP (no shared Python package
+# between the two deployable units). These are abuse/payload-size guards,
+# not a proxy for what the trained encoders see -- catching them
+# client-side just gives an immediate, specific warning instead of a
+# generic 422 after a round trip. Cases over MAX_MESSAGES_PER_CASE messages
+# are still rejected outright -- backend/model_runtime/job_runner.py splits
+# long cases into multiple analysis windows, but only up to this cap.
+MAX_MESSAGE_TEXT_LENGTH = 3_000
+MAX_MESSAGES_PER_CASE = 120
+
 
 # ============================================================
 # 1. Backend HTTP client helpers
@@ -196,8 +215,29 @@ def render_submit_case() -> None:
         placeholder="UserA: Hey, keep this between us...\nUserB: Why?\nUserA: Just trust me.",
     )
 
-    if st.button("Submit Case", type="primary", key="submit_case_button"):
-        messages = parse_messages(conversation_text, input_mode)
+    messages = parse_messages(conversation_text, input_mode)
+
+    over_soft = [(i, len(m["text"])) for i, m in enumerate(messages) if len(m["text"]) > SOFT_MESSAGE_LENGTH_WARNING]
+    if over_soft:
+        details = "; ".join(f"message {i + 1} ({n} chars)" for i, n in over_soft)
+        st.info(
+            f"Over ~{SOFT_MESSAGE_LENGTH_WARNING} characters, so the trained text/emotion "
+            f"encoders will likely only see the first part of it: {details}. This is still "
+            "accepted and analyzed -- the LLM signal extractor and rule engine see the full "
+            "text regardless, and the result will flag which parts had partial model "
+            "coverage. No action needed unless you want full encoder coverage too."
+        )
+
+    over_hard = [(i, len(m["text"])) for i, m in enumerate(messages) if len(m["text"]) > MAX_MESSAGE_TEXT_LENGTH]
+    over_message_count = len(messages) > MAX_MESSAGES_PER_CASE
+    blocked = bool(over_hard) or over_message_count
+    if over_hard:
+        details = "; ".join(f"message {i + 1} ({n} chars)" for i, n in over_hard)
+        st.warning(f"Over the {MAX_MESSAGE_TEXT_LENGTH}-character operational limit per message: {details}.")
+    if over_message_count:
+        st.warning(f"{len(messages)} messages exceeds the {MAX_MESSAGES_PER_CASE}-message-per-case limit.")
+
+    if st.button("Submit Case", type="primary", key="submit_case_button", disabled=blocked):
         if not messages:
             st.warning("Please paste a conversation or text first.")
             return
@@ -205,7 +245,10 @@ def render_submit_case() -> None:
         response = api_request("POST", "/cases", json={"priority": priority, "messages": messages})
         if response is not None and response.status_code == 202:
             payload = response.json()
-            st.success(f"Case submitted (status: {payload['status']}). Case ID: {payload['case_id']}")
+            st.success(
+                f"Case submitted (status: {payload['status']}). Case ID: {payload['case_id']}. "
+                "See it under the Case Queue tab -- it's now pre-selected there."
+            )
             st.session_state["selected_case_id"] = payload["case_id"]
 
 
@@ -237,7 +280,9 @@ def render_case_queue() -> None:
     chosen = st.selectbox("Open a case", list(options.keys()), key="case_queue_select")
     if st.button("View selected case", key="case_queue_view_button"):
         st.session_state["selected_case_id"] = options[chosen]
-        st.rerun()
+
+    st.divider()
+    render_case_detail()
 
 
 # ============================================================
@@ -371,11 +416,9 @@ if not is_logged_in():
     render_login()
 else:
     st.title("🛡️ Conversation Risk Decision Support")
-    tab_submit, tab_queue, tab_detail = st.tabs(["Submit Case", "Case Queue", "Case Detail"])
+    tab_submit, tab_queue = st.tabs(["Submit Case", "Case Queue"])
 
     with tab_submit:
         render_submit_case()
     with tab_queue:
         render_case_queue()
-    with tab_detail:
-        render_case_detail()

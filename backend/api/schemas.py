@@ -22,15 +22,34 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+# Operational abuse/payload-size guards only -- NOT a proxy for what the
+# trained encoders actually see. The real-mode MessageEncoder/
+# GoEmotionsClassifier still truncate at 128 tokens per message
+# (model_runtime/loader.py); that's a model-coverage limitation surfaced via
+# the explainability service's data_limitations (job_runner.py), not an API
+# rejection -- rejecting a long but legitimate message (e.g. a threat letter)
+# would lose evidence instead of just analyzing it partially.
+MAX_MESSAGE_TEXT_LENGTH = 3_000
+
+# Cases over this many messages are split into multiple sequential
+# windows for analysis (job_runner.py's build_windows), not just the most
+# recent RISK_PLATFORM_WINDOW_SIZE -- but still bounded here so one
+# submission can't queue an unbounded number of model-inference passes.
+# Together with MAX_MESSAGE_TEXT_LENGTH above, this already bounds total
+# per-submission text to MAX_MESSAGES_PER_CASE * MAX_MESSAGE_TEXT_LENGTH --
+# a separate total-text-length check would never be able to fire on its own.
+MAX_MESSAGES_PER_CASE = 120
+
+
 class MessageIn(BaseModel):
     speaker: str
-    text: str
+    text: str = Field(max_length=MAX_MESSAGE_TEXT_LENGTH)
     timestamp: datetime | None = None
 
 
 class CaseSubmitRequest(BaseModel):
     priority: Literal["standard", "urgent"] = "standard"
-    messages: list[MessageIn] = Field(min_length=1)
+    messages: list[MessageIn] = Field(min_length=1, max_length=MAX_MESSAGES_PER_CASE)
 
 
 class CaseSubmitResponse(BaseModel):
