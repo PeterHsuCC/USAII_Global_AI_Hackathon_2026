@@ -123,6 +123,37 @@ def test_full_case_lifecycle(client: TestClient):
     assert forbidden.status_code == 403
 
 
+def test_long_single_message_does_not_overflow_stub_position_embeddings(client: TestClient):
+    """A long "letter"-style single message tokenizes past the stub tiny
+    BERT's max_position_embeddings (32) unless MessageEncoder/
+    GoEmotionsClassifier are constructed with a matching max_length in
+    backend/model_runtime/loader.py -- previously this crashed inference
+    with a tensor-shape mismatch and the case landed in the DLQ instead of
+    ready_for_review."""
+    analyst_headers = _login(client, ANALYST_LOGIN)
+
+    long_letter = (
+        "To whoever reads this, you have ignored my warnings for too long. "
+        "If you keep talking about me or try to report this, there will be "
+        "consequences. I know where you usually go after school, and I can "
+        "make sure everyone sees the messages I saved. Do not show this "
+        "letter to anyone. Do not tell your parents. If you do, things will "
+        "get much worse for you. This is your final warning. "
+        "I am going to kill you."
+    )
+
+    submit = client.post(
+        "/cases",
+        json={"priority": "standard", "messages": [{"speaker": "A", "text": long_letter}]},
+        headers=analyst_headers,
+    )
+    assert submit.status_code == 202, submit.text
+    case_id = submit.json()["case_id"]
+
+    detail = _wait_for_case_status(client, case_id, analyst_headers, {"ready_for_review", "dlq_investigation"})
+    assert detail["case"]["status"] == "ready_for_review", detail
+
+
 def test_cross_org_case_access_denied(client: TestClient):
     analyst_headers = _login(client, ANALYST_LOGIN)
     submit = client.post("/cases", json={"messages": [{"speaker": "A", "text": "hello"}]}, headers=analyst_headers)

@@ -57,6 +57,21 @@ def test_detects_threat_phrase():
     assert signals.threat_phrase is True
 
 
+def test_detects_threat_phrase_going_to_phrasing():
+    window = _window("i am going to kill you")
+    signals = RuleSignalExtractor().extract(window)
+
+    assert signals.threat_phrase is True
+
+
+def test_detects_threat_phrase_gonna_and_will_phrasings():
+    for text in ("i'm gonna hurt you", "i will find you", "i going to kill you"):
+        window = _window(text)
+        signals = RuleSignalExtractor().extract(window)
+
+        assert signals.threat_phrase is True, text
+
+
 def test_evidence_records_every_triggering_message_for_a_rule():
     window = _window(
         "send me a pic",  # index 0: image_request
