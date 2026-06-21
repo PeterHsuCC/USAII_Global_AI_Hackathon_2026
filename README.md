@@ -39,6 +39,12 @@ Set `RISK_PLATFORM_API_URL` for the frontend if the backend isn't at `http://loc
   RISK_PLATFORM_MODEL_MODE=real uvicorn backend.main:app
   ```
 
+### Case size limits and multi-window analysis
+
+- A single message is capped at 3,000 characters; a case at 120 messages (`backend/api/schemas.py`) — operational abuse/payload-size guards, not a proxy for what the trained encoders actually see.
+- The rolling Conversation Window defaults to the most recent 12 messages (`RISK_PLATFORM_WINDOW_SIZE`). Cases longer than that are split into multiple sequential, non-overlapping windows and analyzed in order through the same pipeline instance, so Historical State (accumulated risk/trend/persistence) and the early-warning latch carry across windows (`backend/model_runtime/job_runner.py`). This multi-window aggregation is a proposed extension with no labeled-outcome validation of its own — see the Hybrid Conversation Risk Detection Report's Sections 9.1 and 19.6.
+- Each message is still truncated at 128 tokens by the trained text/emotion encoders (Section 4.1) regardless of window — the LLM safety-signal extractor and rule engine see each message's full text either way. Both limitations are surfaced to analysts via the result's `data_limitations` whenever they actually occur.
+
 ### Architecture and what's substituted
 
 `backend/` implements the design in `Final_External_Architecture_Conclusion_v6.docx` (Section 13's "Hackathon MVP" scope, expanded to also cover RBAC, the DLQ, audit hash-chaining, rate limiting, and the Explainability Service) on a lightweight stack instead of the doc's full production stack:
@@ -54,3 +60,5 @@ Set `RISK_PLATFORM_API_URL` for the frontend if the backend isn't at `http://loc
 | WAF + load balancer | Single FastAPI/uvicorn instance |
 
 RBAC permission checks, the case status state machine, audit log hash-chaining, DLQ failure classification and redrive, the Explainability Service's five output types with mandatory disclaimers, and rate limiting are all implemented as specified — only the underlying infrastructure is lighter weight. Run the backend test suite with `pytest tests/backend/ -v`.
+
+See `External_Architecture_Gap_Analysis.md` for the full file/line-level comparison against the doc — functional and operational gaps not covered by the substitutions above, plus bugs found and fixed via code audit and live demo testing.

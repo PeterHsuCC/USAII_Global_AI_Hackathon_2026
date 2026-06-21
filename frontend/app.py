@@ -36,6 +36,40 @@ SOFT_MESSAGE_LENGTH_WARNING = 400
 MAX_MESSAGE_TEXT_LENGTH = 3_000
 MAX_MESSAGES_PER_CASE = 120
 
+# Mirrors backend/auth/roles.py's ROLE_PERMISSIONS -- duplicated rather than
+# imported for the same reason as the limits above (HTTP-only boundary
+# between the two deployable units). Used only to decide which tabs to
+# render; the backend independently re-checks every request regardless of
+# what the UI shows (same principle as _peek_role below). Four of these
+# permissions (view_high_risk_cases, override_decision, manage_org_members,
+# record_safeguarding_outcome) have no enforcing backend code path yet
+# (External_Architecture_Gap_Analysis.md gap #2 and items found 2026-06-21)
+# so no tab is built around them here either.
+ROLE_PERMISSIONS: dict[str, set[str]] = {
+    "analyst": {"view_assigned_cases", "submit_case", "submit_decision"},
+    "senior_reviewer": {
+        "view_assigned_cases",
+        "view_all_org_cases",
+        "view_high_risk_cases",
+        "submit_case",
+        "submit_decision",
+        "override_decision",
+    },
+    "safeguarding_specialist": {
+        "view_assigned_cases",
+        "access_referral_data",
+        "record_safeguarding_outcome",
+        "submit_decision",
+    },
+    "organization_admin": {"manage_org_members"},
+    "system_admin": {"maintain_platform"},
+    "auditor": {"read_audit_log"},
+}
+
+
+def role_permissions() -> set[str]:
+    return ROLE_PERMISSIONS.get(st.session_state.get("role", ""), set())
+
 
 # ============================================================
 # 1. Backend HTTP client helpers
@@ -407,7 +441,84 @@ def render_case_detail() -> None:
 
 
 # ============================================================
-# 7. Main
+# 7. Audit log (Auditor)
+# ============================================================
+
+def render_audit_log() -> None:
+    st.subheader("Audit Log")
+
+    response = api_request("GET", "/audit")
+    if response is None or response.status_code != 200:
+        return
+
+    data = response.json()
+    if data["chain_valid"]:
+        st.success("Hash chain valid.")
+    else:
+        st.error("Hash chain INVALID -- possible tampering. Escalate immediately.")
+
+    events = data["events"]
+    if not events:
+        st.info("No audit events yet.")
+        return
+
+    import pandas as pd
+
+    df = pd.DataFrame(events)[["event_timestamp", "event_type", "actor_role", "actor_id", "case_id", "audit_id"]]
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+# ============================================================
+# 8. Platform administration (System Admin)
+# ============================================================
+
+def render_admin() -> None:
+    st.subheader("Platform Administration")
+
+    st.markdown("### Metrics")
+    metrics_response = api_request("GET", "/admin/metrics")
+    if metrics_response is not None and metrics_response.status_code == 200:
+        metrics = metrics_response.json()
+        st.metric("Open DLQ depth", metrics["open_dlq_depth"])
+        st.json(metrics["counters"])
+
+    st.markdown("### Dead-Letter Queue")
+    if st.button("Refresh DLQ", key="admin_refresh_dlq_button"):
+        st.rerun()
+
+    dlq_response = api_request("GET", "/admin/dlq")
+    if dlq_response is not None and dlq_response.status_code == 200:
+        dlq = dlq_response.json()
+        if dlq["alert"]:
+            st.error("DLQ depth alert threshold exceeded.")
+        entries = dlq["entries"]
+        if not entries:
+            st.success("DLQ is empty.")
+        for entry in entries:
+            with st.expander(f"{entry['dlq_id']} -- {entry['error_category']} ({entry['resolution_status']})"):
+                st.json(entry)
+                col1, col2 = st.columns(2)
+                if col1.button("Redrive", key=f"redrive_{entry['dlq_id']}"):
+                    r = api_request("POST", f"/admin/dlq/{entry['dlq_id']}/redrive")
+                    if r is not None and r.status_code == 200:
+                        st.success("Redriven -- requeued for analysis.")
+                        st.rerun()
+                if col2.button("Close as invalid", key=f"close_{entry['dlq_id']}"):
+                    r = api_request("POST", f"/admin/dlq/{entry['dlq_id']}/close")
+                    if r is not None and r.status_code == 200:
+                        st.success("Closed.")
+                        st.rerun()
+
+    st.markdown("### Retention Sweep")
+    if st.button("Run retention sweep now", key="admin_run_retention_button"):
+        r = api_request("POST", "/admin/retention/run")
+        if r is not None and r.status_code == 200:
+            result = r.json()
+            st.success(f"Deleted: {result['deleted']}, deferred (hold active): {result['deferred']}")
+
+
+# ============================================================
+# 9. Main
 # ============================================================
 
 render_sidebar()
@@ -416,9 +527,24 @@ if not is_logged_in():
     render_login()
 else:
     st.title("🛡️ Conversation Risk Decision Support")
-    tab_submit, tab_queue = st.tabs(["Submit Case", "Case Queue"])
+    permissions = role_permissions()
 
-    with tab_submit:
-        render_submit_case()
-    with tab_queue:
-        render_case_queue()
+    tab_specs = [
+        ("Submit Case", "submit_case", render_submit_case),
+        ("Case Queue", "view_assigned_cases", render_case_queue),
+        ("Audit Log", "read_audit_log", render_audit_log),
+        ("Admin", "maintain_platform", render_admin),
+    ]
+    available = [(label, render_fn) for label, permission, render_fn in tab_specs if permission in permissions]
+
+    if not available:
+        st.warning(
+            f"Role '{st.session_state.get('role')}' has no dashboard view implemented yet. "
+            "(Organization Admin's only permission, manage_org_members, has no backend "
+            "endpoint -- see External_Architecture_Gap_Analysis.md gap #2.)"
+        )
+    else:
+        rendered_tabs = st.tabs([label for label, _ in available])
+        for rendered_tab, (_, render_fn) in zip(rendered_tabs, available):
+            with rendered_tab:
+                render_fn()
