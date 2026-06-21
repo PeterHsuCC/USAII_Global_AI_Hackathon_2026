@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 
 import backend.paths  # noqa: F401 -- must run before any risk_detection import
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -68,9 +69,20 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     be the unredacted conversation text the analyst just submitted (a
     sibling field failing validation, e.g. a bad timestamp, still surfaces
     the message text next to it in the same error list). Strip `input`
-    from every error entry before it leaves the server."""
+    from every error entry before it leaves the server.
+
+    A `@model_validator`/`@field_validator` raising plain `ValueError` puts
+    the raw exception object in `error["ctx"]["error"]`; `JSONResponse` only
+    does `json.dumps` and can't serialize that, so it must go through
+    `jsonable_encoder` first -- without it this handler itself raises
+    `TypeError` and the client gets a raw connection error instead of a 422
+    (caught via a real case-submission validator that has since been
+    removed as redundant, not assumed -- see
+    tests/backend/test_end_to_end_lifecycle.py::
+    test_validation_handler_serializes_value_error_in_ctx for a standalone
+    regression test that doesn't depend on any particular validator existing)."""
     sanitized = [{k: v for k, v in error.items() if k != "input"} for error in exc.errors()]
-    return JSONResponse(status_code=422, content={"detail": sanitized})
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(sanitized)})
 
 
 app.include_router(auth.router)

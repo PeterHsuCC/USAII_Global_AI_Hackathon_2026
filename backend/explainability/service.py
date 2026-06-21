@@ -118,21 +118,22 @@ def build_explainability(
     rule_evidence_items: list[RuleEvidenceItem] = []
     triggered_signals: list[TriggeredSignal] = []
 
-    for rule_id, window_indices in outcome.rule_evidence.triggered_message_indices.items():
-        sequences = tuple(
-            seq for seq in (_window_index_to_sequence(outcome, i) for i in window_indices) if seq is not None
-        )
+    # outcome.rule_evidence is already merged across every window the case
+    # was split into (job_runner.py's _merge_rule_evidence_across_windows),
+    # with values translated to absolute message_sequence numbers -- unlike
+    # outcome.result.evidence below, these are not window-local positions,
+    # so no _window_index_to_sequence translation is needed here.
+    for rule_id, sequences in outcome.rule_evidence.triggered_message_indices.items():
         if sequences:
             triggered_signals.append(
-                TriggeredSignal(name=rule_id, score=1.0, source="rule", message_sequences=sequences)
+                TriggeredSignal(name=rule_id, score=1.0, source="rule", message_sequences=tuple(sequences))
             )
-        for window_index in window_indices:
-            sequence = _window_index_to_sequence(outcome, window_index)
+        for sequence in sequences:
             rule_evidence_items.append(
                 RuleEvidenceItem(
                     rule_id=rule_id,
                     severity=RULE_SEVERITY.get(rule_id, "low"),
-                    matched_message_sequence=sequence if sequence is not None else window_index,
+                    matched_message_sequence=sequence,
                     redacted_evidence_span=_redacted_span(messages_by_sequence, sequence),
                 )
             )

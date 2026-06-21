@@ -9,6 +9,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import backend.api.schemas as schemas
 import backend.seed as seed_module
 from backend.api.deps import get_db
 from backend.config import settings
@@ -132,15 +133,19 @@ def test_long_single_message_does_not_overflow_stub_position_embeddings(client: 
     ready_for_review."""
     analyst_headers = _login(client, ANALYST_LOGIN)
 
+    # 379 chars: well under MessageIn's operational limit, but well over 32
+    # tokens once the stub's tiny WordPiece vocab fragments most of these
+    # words into multiple subword/[UNK] pieces -- that token count, not the
+    # character count, is what previously overflowed the position embeddings.
     long_letter = (
         "To whoever reads this, you have ignored my warnings for too long. "
         "If you keep talking about me or try to report this, there will be "
         "consequences. I know where you usually go after school, and I can "
         "make sure everyone sees the messages I saved. Do not show this "
         "letter to anyone. Do not tell your parents. If you do, things will "
-        "get much worse for you. This is your final warning. "
-        "I am going to kill you."
+        "get much worse for you. This is your final warning."
     )
+    assert len(long_letter) <= schemas.MAX_MESSAGE_TEXT_LENGTH
 
     submit = client.post(
         "/cases",
@@ -213,6 +218,111 @@ def test_validation_error_does_not_echo_raw_submitted_content(client: TestClient
     assert secret_text not in response.text
     for error in response.json()["detail"]:
         assert "input" not in error
+
+
+def test_message_text_over_token_budget_is_accepted_not_rejected(client: TestClient):
+    """A message well past the trained encoders' 128-token budget (e.g. a
+    real threat letter) must still be accepted and analyzed -- only the
+    much larger MAX_MESSAGE_TEXT_LENGTH (operational abuse guard, not a
+    proxy for model coverage) should reject anything. Coverage limitations
+    are surfaced separately (see test_job_runner.py), not by rejecting the
+    submission and losing the evidence."""
+    analyst_headers = _login(client, ANALYST_LOGIN)
+    long_text = "a" * 401
+
+    response = client.post(
+        "/cases",
+        json={"messages": [{"speaker": "A", "text": long_text}]},
+        headers=analyst_headers,
+    )
+    assert response.status_code == 202, response.text
+
+
+def test_message_text_over_operational_limit_rejected_by_schema(client: TestClient):
+    """MAX_MESSAGE_TEXT_LENGTH (schemas.py) still bounds a single message
+    against abusive/oversized payloads, with a clear error and without
+    echoing the oversized text back (per the validation handler above)."""
+    analyst_headers = _login(client, ANALYST_LOGIN)
+    overlong_text = "a" * (schemas.MAX_MESSAGE_TEXT_LENGTH + 1)
+
+    response = client.post(
+        "/cases",
+        json={"messages": [{"speaker": "A", "text": overlong_text}]},
+        headers=analyst_headers,
+    )
+    assert response.status_code == 422
+    assert overlong_text not in response.text
+
+
+def test_case_with_more_than_max_messages_rejected_by_schema(client: TestClient):
+    """MAX_MESSAGES_PER_CASE (schemas.py) bounds how many messages one
+    submission can contain -- together with MAX_MESSAGE_TEXT_LENGTH this
+    already bounds total per-submission text, so there is no separate
+    total-text-length check to test here."""
+    analyst_headers = _login(client, ANALYST_LOGIN)
+    message_count = schemas.MAX_MESSAGES_PER_CASE + 1
+
+    response = client.post(
+        "/cases",
+        json={"messages": [{"speaker": "A", "text": "hello"} for _ in range(message_count)]},
+        headers=analyst_headers,
+    )
+    assert response.status_code == 422
+
+
+def test_case_at_max_messages_is_accepted_and_split_into_multiple_windows(client: TestClient):
+    """A case right at MAX_MESSAGES_PER_CASE, well over the default
+    RISK_PLATFORM_WINDOW_SIZE (12), must still be fully accepted and
+    analyzed via job_runner.py's multi-window split, not rejected or
+    silently truncated to the last window."""
+    analyst_headers = _login(client, ANALYST_LOGIN)
+    message_count = schemas.MAX_MESSAGES_PER_CASE
+
+    submit = client.post(
+        "/cases",
+        json={"messages": [{"speaker": "A", "text": f"message {i}"} for i in range(message_count)]},
+        headers=analyst_headers,
+    )
+    assert submit.status_code == 202, submit.text
+    case_id = submit.json()["case_id"]
+
+    detail = _wait_for_case_status(client, case_id, analyst_headers, {"ready_for_review", "dlq_investigation"})
+    assert detail["case"]["status"] == "ready_for_review", detail
+    limitations = detail["results"][0]["explainability"]["data_limitations"]
+    assert any("split into" in limitation for limitation in limitations)
+
+
+def test_validation_handler_serializes_value_error_in_ctx():
+    """A `@model_validator`/`@field_validator` raising plain `ValueError`
+    puts the raw exception object in `error["ctx"]["error"]` (Pydantic v2);
+    `JSONResponse` only does `json.dumps` and can't serialize that without
+    `jsonable_encoder` first. Standalone unit test against the handler
+    function itself so this regression check doesn't depend on any
+    particular validator existing in the live schemas (the one that
+    originally caught this, CaseSubmitRequest's total-text-length check,
+    has since been removed as redundant -- see schemas.py)."""
+    import asyncio
+
+    from fastapi.exceptions import RequestValidationError
+
+    from backend.main import validation_exception_handler
+
+    exc = RequestValidationError(
+        [
+            {
+                "type": "value_error",
+                "loc": ("body",),
+                "msg": "Value error, too long",
+                "input": {"text": "should not leak"},
+                "ctx": {"error": ValueError("too long")},
+            }
+        ]
+    )
+
+    response = asyncio.run(validation_exception_handler(None, exc))
+
+    assert response.status_code == 422
+    assert "should not leak" not in response.body.decode()
 
 
 def test_invalid_decision_type_rejected_by_schema(client: TestClient):
