@@ -12,7 +12,9 @@ import json
 import math
 from dataclasses import asdict, dataclass
 
-from backend.model_runtime.job_runner import AnalysisOutcome
+from risk_detection.model.emotion.emotion_mapping import MAPPED_EMOTION_NAMES
+
+from backend.model_runtime.job_runner import AnalysisOutcome, risk_level_from_score
 
 
 def _finite_or(value: float, fallback: float) -> float:
@@ -23,6 +25,35 @@ def _finite_or(value: float, fallback: float) -> float:
     most-uncertain value here means a non-finite result always reads as
     "treat this as maximally uncertain", not as a confident answer."""
     return value if math.isfinite(value) else fallback
+
+
+def _operable_risk_score(
+    cyberbullying_score: float,
+    grooming_score: float,
+    rule_safety_score: float,
+    llm_signals,
+) -> float:
+    """max() across every score that does NOT depend on an untrained head:
+    the trained Cyberbullying/Grooming Heads, the rule-based safety score,
+    and the six LLM-extracted safety signals. Deliberately excludes
+    emotion_component_score (EmotionScoreHead is untrained, same defect as
+    RiskFusion) and overall_score/safety_score (RiskFusion itself) --
+    found live, on a 31-message case where every one of those scores was
+    low but risk_level still read "high" off RiskFusion's noise. A single
+    elevated signal is enough to raise this max, mirroring Section 13's
+    existing single-rule Review_t override rather than averaging signals
+    together and diluting one severe one."""
+    return max(
+        cyberbullying_score,
+        grooming_score,
+        rule_safety_score,
+        llm_signals.secrecy,
+        llm_signals.isolation,
+        llm_signals.dependency,
+        llm_signals.sexual_escalation,
+        llm_signals.threat,
+        llm_signals.coercion,
+    )
 
 ATTENTION_DISCLAIMER = (
     "Attention weights indicate which messages the model focused on. They "
@@ -72,6 +103,23 @@ class ModelEvidence:
     attention_focus_message_sequences: tuple[int, ...]
     cyberbullying_component_score: float
     grooming_component_score: float
+    # S~_r(t) (Section 13): the rule safety score itself, not just which
+    # named rules fired -- this is the exact number `human_review_required`
+    # checks against the 0.8 review threshold, and (unlike
+    # emotion_component_score below) it's purely rule-based, with no
+    # untrained learned weights involved.
+    rule_safety_score: float
+    # S_emotion(t) (Section 10.2/16) -- like cyberbullying/grooming above,
+    # but routed through EmotionScoreHead, which (per data_limitations
+    # below) is untrained, so this is illustrative, not a calibrated score.
+    emotion_component_score: float
+    # M_t = [Fear, Sadness, Anger, Distress, Dependency] (Section 10.2):
+    # unlike emotion_component_score, these come from the frozen pretrained
+    # GoEmotions classifier plus a fixed (not learned) mapping, so they're
+    # real signal, not a placeholder -- src/risk_detection/model/inference/
+    # dashboard.py's to_dashboard_dict() already computes this exact shape
+    # for the "Section 16" dashboard JSON, just never wired into this API.
+    mapped_emotions: dict[str, float]
     attention_disclaimer: str = ATTENTION_DISCLAIMER
 
 
@@ -81,6 +129,16 @@ class ConfidenceAndUncertainty:
     confidence: float
     uncertainty: float
     mc_dropout_variance: float
+    # max() across cyberbullying/grooming/rule-safety scores and the six
+    # LLM-extracted safety signals -- everything that does NOT depend on
+    # an untrained head (RiskFusion, EmotionScoreHead) -- bucketed with
+    # the same thresholds as risk_level above (job_runner.py's
+    # RISK_LEVEL_THRESHOLDS), so "high" means the same thing either way.
+    # Shown alongside risk_level for comparison; does not feed
+    # human_review_required, which keeps its own existing, separately
+    # validated rule/LLM-based condition (Section 13).
+    operable_risk_score: float
+    operable_risk_level: str
 
 
 @dataclass(frozen=True)
@@ -155,6 +213,10 @@ def build_explainability(
         seq for seq in (_window_index_to_sequence(outcome, i) for i in evidence.conversation) if seq is not None
     )
 
+    cyberbullying_score = float(outcome.result.component_scores["cyberbullying"].item())
+    grooming_score = float(outcome.result.component_scores["grooming"].item())
+    rule_score = float(outcome.result.component_scores["rule_score"].item())
+
     model_evidence = ModelEvidence(
         high_risk_message_sequences=high_risk_sequences,
         attention_focus_message_sequences=attention_sequences,
@@ -162,9 +224,14 @@ def build_explainability(
         # not expose per-message classifier scores without a redundant
         # second forward pass, so this is scoped to what's actually
         # available rather than overclaiming a finer granularity.
-        cyberbullying_component_score=float(outcome.result.component_scores["cyberbullying"].item()),
-        grooming_component_score=float(outcome.result.component_scores["grooming"].item()),
+        cyberbullying_component_score=cyberbullying_score,
+        grooming_component_score=grooming_score,
+        rule_safety_score=rule_score,
+        emotion_component_score=float(outcome.result.emotion_score.item()),
+        mapped_emotions=dict(zip(MAPPED_EMOTION_NAMES, (float(v) for v in outcome.result.mapped_emotions.tolist()))),
     )
+
+    operable_score = _operable_risk_score(cyberbullying_score, grooming_score, rule_score, llm_signals)
 
     uncertainty = outcome.result.uncertainty_estimate
     confidence_and_uncertainty = ConfidenceAndUncertainty(
@@ -172,6 +239,8 @@ def build_explainability(
         confidence=_finite_or(float(uncertainty.confidence.item()), 0.0),
         uncertainty=_finite_or(float(uncertainty.uncertainty.item()), 1.0),
         mc_dropout_variance=_finite_or(float(uncertainty.variance.item()), 0.25),
+        operable_risk_score=operable_score,
+        operable_risk_level=risk_level_from_score(operable_score),
     )
 
     data_limitations = tuple(outcome.result.limitations) + outcome.extra_limitations + preprocessing_limitations

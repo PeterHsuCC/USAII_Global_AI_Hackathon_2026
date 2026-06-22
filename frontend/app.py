@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -36,6 +36,12 @@ SOFT_MESSAGE_LENGTH_WARNING = 400
 MAX_MESSAGE_TEXT_LENGTH = 3_000
 MAX_MESSAGES_PER_CASE = 120
 
+# Must match src/risk_detection/model/inference/uncertainty.py's
+# DEFAULT_RULE_THRESHOLD -- the rule safety score crossing this is one of
+# the two conditions that sets human_review_required (the other being the
+# threat_phrase rule), shown here purely for context next to the score.
+RULE_REVIEW_THRESHOLD = 0.8
+
 # Mirrors backend/auth/roles.py's ROLE_PERMISSIONS -- duplicated rather than
 # imported for the same reason as the limits above (HTTP-only boundary
 # between the two deployable units). Used only to decide which tabs to
@@ -69,6 +75,82 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
 
 def role_permissions() -> set[str]:
     return ROLE_PERMISSIONS.get(st.session_state.get("role", ""), set())
+
+
+# ============================================================
+# 0b. Display formatting helpers
+# ============================================================
+#
+# The backend's API is a system-to-system contract, so it returns raw
+# identifiers (snake_case status/role/decision strings, 0-indexed message
+# positions, ISO 8601 timestamps with no timezone label visible at a
+# glance). None of that is what a human reviewer should see -- everything
+# rendered to the analyst/auditor/admin goes through one of these first.
+
+def humanize(value: str | None) -> str:
+    """`ready_for_review` -> `ready for review`. Applied to every
+    status/decision/role/event-type/category string shown in the UI."""
+    if not value:
+        return "—"
+    return value.replace("_", " ")
+
+
+def format_timestamp(value: str | None) -> str:
+    """Backend timestamps are meant to be UTC (SQLAlchemy
+    `DateTime(timezone=True)`), but the SQLite substitution (see README's
+    architecture table) doesn't actually persist the offset, so these come
+    back as bare strings like `2026-06-21T21:37:33.223284` with nothing
+    indicating which timezone that is. Renders a fixed, explicitly-labeled
+    `YYYY-MM-DD HH:MM UTC` form instead -- and for date-only fields (e.g.
+    `retention_until`, which has no time component at all), just the date,
+    so it doesn't look like a precise moment in time that it isn't."""
+    if not value:
+        return "—"
+    raw = str(value)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if "T" not in raw:
+        return parsed.strftime("%Y-%m-%d")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def line_label(message_sequence: int) -> str:
+    """`message_sequence` is the 0-indexed position of a message within the
+    case's conversation (backend/explainability/service.py). Analysts read
+    conversations as numbered lines, not array indices, so this is always
+    shown as 1-indexed "Line N"."""
+    return f"Line {message_sequence + 1}"
+
+
+def line_labels(message_sequences: list[int] | tuple[int, ...]) -> str:
+    return ", ".join(line_label(s) for s in message_sequences)
+
+
+def humanize_limitation(value: str) -> str:
+    """Most `data_limitations` entries are already full sentences (and may
+    legitimately embed an all-caps env var name with underscores, e.g.
+    `RISK_PLATFORM_WINDOW_SIZE` -- humanizing those would corrupt them).
+    Only the bare single-token codes from
+    backend/preprocessing/anonymize.py (e.g.
+    `missing_timestamps_used_submission_order`) need humanizing, so this
+    only touches a string with no spaces at all."""
+    return humanize(value) if " " not in value else value
+
+
+def case_label(case: dict[str, Any], position: int | None = None) -> str:
+    """Cases have no name field in the schema (backend/db/models.py's Case
+    table has none), so this builds a human-readable label instead of
+    showing the raw case_id UUID everywhere: a queue position (when one is
+    known, e.g. from the Case Queue table), a short id fragment so it can
+    still be cross-referenced against the audit log or admin views, plus
+    priority and status for at-a-glance context."""
+    short_id = str(case["case_id"])[:8]
+    prefix = f"Case #{position}" if position is not None else "Case"
+    return f"{prefix} ({short_id}) -- {humanize(case['priority'])} priority, {humanize(case['status'])}"
 
 
 # ============================================================
@@ -161,7 +243,9 @@ def render_sidebar() -> None:
     st.sidebar.text_input("Backend API URL", key="api_base_url", value=api_base_url())
 
     if is_logged_in():
-        st.sidebar.success(f"Logged in as {st.session_state.get('email')}\n\nRole: {st.session_state.get('role')}")
+        st.sidebar.success(
+            f"Logged in as {st.session_state.get('email')}\n\nRole: {humanize(st.session_state.get('role'))}"
+        )
         if st.sidebar.button("Log out", key="logout_button"):
             for key in ("access_token", "refresh_token", "role", "email", "selected_case_id"):
                 st.session_state.pop(key, None)
@@ -280,7 +364,8 @@ def render_submit_case() -> None:
         if response is not None and response.status_code == 202:
             payload = response.json()
             st.success(
-                f"Case submitted (status: {payload['status']}). Case ID: {payload['case_id']}. "
+                f"Case submitted (status: {humanize(payload['status'])}). "
+                f"Reference ID: {payload['case_id']}. "
                 "See it under the Case Queue tab -- it's now pre-selected there."
             )
             st.session_state["selected_case_id"] = payload["case_id"]
@@ -307,10 +392,29 @@ def render_case_queue() -> None:
 
     import pandas as pd
 
-    df = pd.DataFrame(cases)[["case_id", "status", "priority", "created_at", "updated_at", "assigned_analyst_id"]]
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    # Cases have no name field (backend/db/models.py's Case table has none),
+    # so a stable "#N" queue position -- assigned chronologically, oldest
+    # first, regardless of display order -- stands in for a clearer case
+    # name than the raw case_id UUID. See case_label().
+    chronological = sorted(cases, key=lambda c: c["created_at"])
+    positions = {c["case_id"]: i + 1 for i, c in enumerate(chronological)}
+    newest_first = sorted(cases, key=lambda c: c["created_at"], reverse=True)
 
-    options = {f"{c['case_id']}  ({c['status']})": c["case_id"] for c in cases}
+    rows = [
+        {
+            "Case": f"#{positions[c['case_id']]}",
+            "Status": humanize(c["status"]),
+            "Priority": humanize(c["priority"]),
+            "Created": format_timestamp(c["created_at"]),
+            "Updated": format_timestamp(c["updated_at"]),
+            "Assigned Analyst": c["assigned_analyst_id"] or "Unassigned",
+            "Reference ID": c["case_id"],
+        }
+        for c in newest_first
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    options = {case_label(c, positions[c["case_id"]]): c["case_id"] for c in newest_first}
     chosen = st.selectbox("Open a case", list(options.keys()), key="case_queue_select")
     if st.button("View selected case", key="case_queue_view_button"):
         st.session_state["selected_case_id"] = options[chosen]
@@ -334,17 +438,51 @@ MANDATORY_DISCLAIMER_BOX = (
 def render_explainability(explainability: dict[str, Any]) -> None:
     st.warning(MANDATORY_DISCLAIMER_BOX)
 
+    # RiskFusion/EmotionScoreHead are untrained in this build -- both
+    # Risk Level/Confidence/Uncertainty below and the Emotion Score further
+    # down derive from them, so both get the same caveat, driven off the
+    # same data_limitations entry rather than two separate hardcoded checks.
+    uncalibrated = any(
+        "have not yet been trained or calibrated" in limitation for limitation in explainability["data_limitations"]
+    )
+
     cu = explainability["confidence_and_uncertainty"]
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Risk Level", cu["risk_level"])
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Risk Level", humanize(cu["risk_level"]))
     col2.metric("Confidence", f"{cu['confidence']:.2f}")
     col3.metric("Uncertainty", f"{cu['uncertainty']:.2f}")
+    # None on results analyzed before this field existed (old persisted
+    # evidence_json) -- backend/api/schemas.py's ConfidenceAndUncertaintyOut
+    # defaults it to None rather than 500ing on read.
+    has_operable_risk_level = cu.get("operable_risk_level") is not None
+    if has_operable_risk_level:
+        col4.metric("Operable Risk Level", humanize(cu["operable_risk_level"]))
+
+    # Found via a live low-risk test case scoring "high" at ~1.00
+    # confidence -- surfacing this right next to the metrics, not just
+    # buried in the Data Limitations captions further down, so it doesn't
+    # read as a bug.
+    if uncalibrated:
+        st.caption(
+            "Risk Level, Confidence, and Uncertainty above are not yet calibrated -- "
+            "treat them as illustrative only, not a validated risk score (see Data Limitations below)."
+        )
+    if has_operable_risk_level:
+        st.caption(
+            "Operable Risk Level is the highest of the cyberbullying/grooming/rule-safety "
+            "scores and the LLM-extracted signals below -- unlike Risk Level above, it "
+            "does not depend on the untrained RiskFusion/EmotionScoreHead. It is still not "
+            "a substitute for reading the conversation: individual components can carry "
+            "their own known biases (for example, the Grooming Head scoring ordinary "
+            "meeting/farewell language as high) and it has not been validated against "
+            "labeled outcomes."
+        )
 
     st.markdown("**Triggered Signals**")
     if explainability["triggered_signals"]:
         for signal in explainability["triggered_signals"]:
-            refs = ", ".join(f"#{s}" for s in signal["message_sequences"]) or "window-level"
-            st.write(f"- `{signal['name']}` ({signal['source']}) score={signal['score']:.2f} -- messages {refs}")
+            refs = line_labels(signal["message_sequences"]) or "applies to the whole conversation"
+            st.write(f"- `{signal['name']}` ({signal['source']}) score={signal['score']:.2f} -- {refs}")
     else:
         st.caption("No signals triggered.")
 
@@ -352,7 +490,8 @@ def render_explainability(explainability: dict[str, Any]) -> None:
     if explainability["rule_evidence"]:
         for item in explainability["rule_evidence"]:
             st.write(
-                f"- `{item['rule_id']}` (severity: {item['severity']}) at message #{item['matched_message_sequence']}: "
+                f"- `{item['rule_id']}` (severity: {item['severity']}) at "
+                f"{line_label(item['matched_message_sequence'])}: "
                 f"\"{item['redacted_evidence_span'] or '(suppressed)'}\""
             )
     else:
@@ -362,19 +501,44 @@ def render_explainability(explainability: dict[str, Any]) -> None:
     me = explainability["model_evidence"]
     st.write(f"- Cyberbullying component score: {me['cyberbullying_component_score']:.2f}")
     st.write(f"- Grooming component score: {me['grooming_component_score']:.2f}")
-    st.write(f"- High-risk messages: {list(me['high_risk_message_sequences'])}")
-    st.write(f"- Attention focus messages: {list(me['attention_focus_message_sequences'])}")
+    rule_safety_score = me["rule_safety_score"]
+    rule_safety_score_label = f"{rule_safety_score:.2f}" if rule_safety_score is not None else "not available (case predates this metric)"
+    st.write(f"- Rule safety score: {rule_safety_score_label} (mandatory review threshold: {RULE_REVIEW_THRESHOLD:.2f})")
+    st.write(f"- High-risk lines: {line_labels(me['high_risk_message_sequences']) or 'none'}")
+    st.write(f"- Attention focus lines: {line_labels(me['attention_focus_message_sequences']) or 'none'}")
     st.info(me["attention_disclaimer"])
+
+    st.markdown("**Emotion Analysis**")
+    emotion_score = me["emotion_component_score"]
+    emotion_score_label = f"{emotion_score:.2f}" if emotion_score is not None else "not available (case predates this metric)"
+    st.write(f"- Emotion score: {emotion_score_label}")
+    if uncalibrated:
+        st.caption("Emotion score above is not yet calibrated -- treat it as illustrative only.")
+    # Unlike emotion_component_score above, these 5 values come from a
+    # frozen pretrained GoEmotions classifier plus a fixed (not learned)
+    # mapping (src/risk_detection/model/emotion/emotion_mapping.py) -- real
+    # signal, not a placeholder, so no calibration caveat applies here.
+    if me["mapped_emotions"]:
+        emotion_cols = st.columns(len(me["mapped_emotions"]))
+        for col, (name, value) in zip(emotion_cols, me["mapped_emotions"].items()):
+            col.metric(humanize(name).title(), f"{value:.2f}")
+    else:
+        st.caption("Mapped emotions not available (case predates this metric).")
 
     st.markdown("**Data Limitations**")
     for limitation in explainability["data_limitations"]:
-        st.caption(f"- {limitation}")
+        st.caption(f"- {humanize_limitation(limitation)}")
 
 
 def render_decision_form(case_id: str) -> None:
     st.markdown("### Record a Decision")
     with st.form("decision_form"):
-        decision_type = st.selectbox("Decision", ["refer", "close", "monitor", "more_info"], key="decision_type_select")
+        decision_type = st.selectbox(
+            "Decision",
+            ["refer", "close", "monitor", "more_info"],
+            format_func=humanize,
+            key="decision_type_select",
+        )
         rationale = st.text_area("Rationale (will be PII-redacted before storage)", key="decision_rationale_input")
         submitted = st.form_submit_button("Submit Decision", type="primary")
 
@@ -395,7 +559,6 @@ def render_case_detail() -> None:
         st.info("Submit a case or pick one from the queue to see its detail here.")
         return
 
-    st.subheader(f"Case Detail: {case_id}")
     response = api_request("GET", f"/cases/{case_id}")
     if response is None:
         return
@@ -411,11 +574,14 @@ def render_case_detail() -> None:
     detail = response.json()
     case = detail["case"]
 
+    st.subheader(case_label(case))
+    st.caption(f"Reference ID: {case['case_id']}")
+
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Status", case["status"])
-    col2.metric("Priority", case["priority"])
-    col3.metric("Created", case["created_at"][:19])
-    col4.metric("Retention Until", case["retention_until"])
+    col1.metric("Status", humanize(case["status"]))
+    col2.metric("Priority", humanize(case["priority"]))
+    col3.metric("Created", format_timestamp(case["created_at"]))
+    col4.metric("Retention Until", format_timestamp(case["retention_until"]))
 
     if case["status"] in ("queued", "validating", "privacy_processing", "analyzing"):
         st.info("Analysis is still in progress. Refresh to check again.")
@@ -427,6 +593,19 @@ def render_case_detail() -> None:
         st.markdown("## Latest Result")
         latest = results[0]
         st.write(f"Human review required: **{latest['human_review_required']}**")
+
+        messages = detail["messages"]
+        if messages:
+            st.markdown("### Conversation")
+            for m in messages:
+                speaker = humanize(m["speaker_local_id"]).title()
+                text = (
+                    m["redacted_content"]
+                    if m["redacted_content"] is not None
+                    else "(content no longer available -- retention period expired)"
+                )
+                st.write(f"**{line_label(m['message_sequence'])}** ({speaker}): {text}")
+
         if latest["explainability"]:
             render_explainability(latest["explainability"])
 
@@ -434,7 +613,10 @@ def render_case_detail() -> None:
     if decisions:
         st.markdown("## Decision History")
         for decision in decisions:
-            st.write(f"- {decision['created_at'][:19]} -- **{decision['decision_type']}**: {decision['rationale'] or ''}")
+            st.write(
+                f"- {format_timestamp(decision['created_at'])} -- "
+                f"**{humanize(decision['decision_type'])}**: {decision['rationale'] or ''}"
+            )
 
     if case["status"] in ("ready_for_review", "under_review"):
         render_decision_form(case_id)
@@ -464,8 +646,18 @@ def render_audit_log() -> None:
 
     import pandas as pd
 
-    df = pd.DataFrame(events)[["event_timestamp", "event_type", "actor_role", "actor_id", "case_id", "audit_id"]]
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    rows = [
+        {
+            "Time": format_timestamp(e["event_timestamp"]),
+            "Event": humanize(e["event_type"]),
+            "Actor Role": humanize(e["actor_role"]),
+            "Actor ID": e["actor_id"],
+            "Case ID": e["case_id"] or "—",
+            "Audit ID": e["audit_id"],
+        }
+        for e in events
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -480,7 +672,7 @@ def render_admin() -> None:
     if metrics_response is not None and metrics_response.status_code == 200:
         metrics = metrics_response.json()
         st.metric("Open DLQ depth", metrics["open_dlq_depth"])
-        st.json(metrics["counters"])
+        st.json({humanize(k): v for k, v in metrics["counters"].items()})
 
     st.markdown("### Dead-Letter Queue")
     if st.button("Refresh DLQ", key="admin_refresh_dlq_button"):
@@ -495,7 +687,8 @@ def render_admin() -> None:
         if not entries:
             st.success("DLQ is empty.")
         for entry in entries:
-            with st.expander(f"{entry['dlq_id']} -- {entry['error_category']} ({entry['resolution_status']})"):
+            title = f"{entry['dlq_id']} -- {humanize(entry['error_category'])} ({humanize(entry['resolution_status'])})"
+            with st.expander(title):
                 st.json(entry)
                 col1, col2 = st.columns(2)
                 if col1.button("Redrive", key=f"redrive_{entry['dlq_id']}"):
@@ -539,7 +732,7 @@ else:
 
     if not available:
         st.warning(
-            f"Role '{st.session_state.get('role')}' has no dashboard view implemented yet. "
+            f"Role '{humanize(st.session_state.get('role'))}' has no dashboard view implemented yet. "
             "(Organization Admin's only permission, manage_org_members, has no backend "
             "endpoint -- see External_Architecture_Gap_Analysis.md gap #2.)"
         )

@@ -1,12 +1,24 @@
 """Builds the shared, expensive model components once at process startup.
 
-Two modes (`settings.model_runtime_mode`):
+Three modes (`settings.model_runtime_mode`):
 
 - "stub": tiny, randomly-initialized encoders + zero-signal LLM/dependency
   stand-ins. No network, fast, deterministic. Used by the automated test
   suite and local dev iteration -- mirrors the pattern in
   tests/model/_tiny_bert.py / _tiny_emotion_classifier.py (duplicated here
-  rather than imported, since backend/ shouldn't depend on tests/).
+  rather than imported, since backend/ shouldn't depend on tests/). Note
+  this also means cyberbullying_head/grooming_head are random in this
+  mode, not just the encoders -- neither is loaded from a checkpoint, so
+  stub-mode cyberbullying/grooming component scores carry no real signal
+  either, found via a live test where escalating a conversation's final
+  message from small talk to an explicit threat barely moved either score.
+- "local": the real trained_weights/ checkpoints for cyberbullying and
+  grooming (same loading code as "real" below) plus the real pretrained
+  GoEmotions classifier, but the zero-signal LLM/dependency stand-ins
+  instead of the Claude-backed ones -- meaningful cyberbullying/grooming/
+  emotion-mapping scores with no ANTHROPIC_API_KEY and no per-case cost,
+  for free local UI testing. LLM-sourced signals (secrecy, isolation, ...)
+  and the emotional-dependency proxy stay at 0, same as "stub".
 - "real": loads the message_encoder.pt + cyberbullying_head.pt checkpoints
   (trained together by scripts/train_cyberbullying.py) for the
   cyberbullying signal, the grooming_*_B.pt trio (trained together by
@@ -61,6 +73,7 @@ from risk_detection.signals.rules import RuleSignalExtractor
 from risk_detection.signals.safety_features import SafetyFeatureExtractor
 
 MODEL_VERSION_STUB = "integrated-pipeline-stub-v1"
+MODEL_VERSION_LOCAL = "integrated-pipeline-local-v1"
 MODEL_VERSION_REAL = "integrated-pipeline-real-v1"
 RULE_VERSION = "rules-v1"
 PREPROCESSING_VERSION = "preprocessing-v1"
@@ -72,6 +85,15 @@ REAL_MODE_EXTRA_LIMITATION = (
     "full corpus, so its checkpoint is not production-grade and is not loaded "
     "here; the underlying label is also PAN12's predator-identity-derived weak "
     "label, not a direct grooming annotation (Section 6)."
+)
+
+LOCAL_MODE_EXTRA_LIMITATION = (
+    "This case was analyzed in 'local' mode: cyberbullying/grooming/emotion "
+    "scores use the real trained checkpoints, but no LLM call was made -- "
+    "every LLM-sourced safety signal (secrecy, isolation, dependency, "
+    "sexual_escalation, threat, coercion) and the emotional-dependency proxy "
+    "are fixed at 0, the same as stub mode, not a genuine absence of those "
+    "signals in the conversation."
 )
 
 
@@ -206,11 +228,8 @@ def _load_stub(hidden_size: int = 8) -> ModelComponents:
     )
 
 
-def _load_real(weights_dir: Path) -> ModelComponents:
+def _load_real(weights_dir: Path, *, use_real_llm_extractors: bool = True) -> ModelComponents:
     import json
-
-    from risk_detection.signals.emotional_dependency import EmotionalDependencyExtractor
-    from risk_detection.signals.llm_safety import LLMSafetySignalExtractor
 
     # cyberbullying_head.pt was trained against the 6-class label set in
     # label_mapping.json (scripts/train_cyberbullying.py builds num_classes
@@ -264,6 +283,20 @@ def _load_real(weights_dir: Path) -> ModelComponents:
     emotion_score_head = EmotionScoreHead()
     risk_fusion = PrototypeRiskFusion()
 
+    if use_real_llm_extractors:
+        from risk_detection.signals.emotional_dependency import EmotionalDependencyExtractor
+        from risk_detection.signals.llm_safety import LLMSafetySignalExtractor
+
+        llm_extractor = LLMSafetySignalExtractor()
+        dependency_extractor = EmotionalDependencyExtractor()
+        model_version = MODEL_VERSION_REAL
+        extra_limitations = (REAL_MODE_EXTRA_LIMITATION,)
+    else:
+        llm_extractor = _ZeroLLMSafetyExtractor()
+        dependency_extractor = _ZeroDependencyExtractor()
+        model_version = MODEL_VERSION_LOCAL
+        extra_limitations = (REAL_MODE_EXTRA_LIMITATION, LOCAL_MODE_EXTRA_LIMITATION)
+
     return ModelComponents(
         message_encoder=message_encoder,
         conversation_encoder=conversation_encoder,
@@ -273,12 +306,12 @@ def _load_real(weights_dir: Path) -> ModelComponents:
         emotion_score_head=emotion_score_head,
         risk_fusion=risk_fusion,
         safety_feature_extractor=SafetyFeatureExtractor(
-            llm_extractor=LLMSafetySignalExtractor(),
+            llm_extractor=llm_extractor,
             rule_extractor=RuleSignalExtractor(),
         ),
-        dependency_extractor=EmotionalDependencyExtractor(),
-        model_version=MODEL_VERSION_REAL,
-        extra_limitations=(REAL_MODE_EXTRA_LIMITATION,),
+        dependency_extractor=dependency_extractor,
+        model_version=model_version,
+        extra_limitations=extra_limitations,
         grooming_message_encoder=grooming_message_encoder,
         grooming_conversation_encoder=grooming_conversation_encoder,
     )
@@ -294,6 +327,8 @@ def get_model_components() -> ModelComponents:
         if _components is None:
             if settings.model_runtime_mode == "real":
                 _components = _load_real(settings.trained_weights_dir)
+            elif settings.model_runtime_mode == "local":
+                _components = _load_real(settings.trained_weights_dir, use_real_llm_extractors=False)
             else:
                 _components = _load_stub()
         return _components
@@ -305,7 +340,11 @@ def current_model_version() -> str:
     doesn't trigger loading the heavy components; only the async worker
     actually needs them loaded.
     """
-    return MODEL_VERSION_REAL if settings.model_runtime_mode == "real" else MODEL_VERSION_STUB
+    if settings.model_runtime_mode == "real":
+        return MODEL_VERSION_REAL
+    if settings.model_runtime_mode == "local":
+        return MODEL_VERSION_LOCAL
+    return MODEL_VERSION_STUB
 
 
 def reset_model_components() -> None:

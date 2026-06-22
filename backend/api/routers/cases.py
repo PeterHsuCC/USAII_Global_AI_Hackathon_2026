@@ -17,6 +17,7 @@ from backend.api.deps import get_db, new_request_id
 from backend.api.schemas import (
     CaseDetailResponse,
     CaseListResponse,
+    CaseMessageOut,
     CaseSubmitRequest,
     CaseSubmitResponse,
     CaseSummary,
@@ -29,7 +30,7 @@ from backend.auth.dependencies import CurrentUser, require_permission
 from backend.auth.roles import SUBMIT_CASE, VIEW_ASSIGNED_CASES, can_access_case
 from backend.config import settings
 from backend.db.models import AnalysisJob, Case, CaseMessage, Conversation, Result
-from backend.db.queries import get_case_for_org, list_cases_for_org
+from backend.db.queries import get_case_for_org, list_cases_for_org, list_messages_for_case
 from backend.db.state_machine import PRIVACY_PROCESSING, QUEUED, SUBMITTED, VALIDATING, transition
 from backend.jobs.queue import job_queue
 from backend.model_runtime.loader import PREPROCESSING_VERSION, RULE_VERSION, current_model_version
@@ -195,4 +196,5 @@ def get_case(
         case=CaseSummary.model_validate(case),
         results=[_result_to_out(r) for r in case.results],
         decisions=[DecisionOut.model_validate(d) for d in case.decisions],
+        messages=[CaseMessageOut.model_validate(m) for m in list_messages_for_case(db, case_id)],
     )

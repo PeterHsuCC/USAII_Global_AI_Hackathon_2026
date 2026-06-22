@@ -95,6 +95,12 @@ class ModelEvidenceOut(BaseModel):
     attention_focus_message_sequences: tuple[int, ...]
     cyberbullying_component_score: float
     grooming_component_score: float
+    # Added after some Result rows were already persisted with older
+    # evidence_json that predates these keys -- default to None/empty so
+    # historical cases stay viewable instead of 500ing on read.
+    rule_safety_score: float | None = None
+    emotion_component_score: float | None = None
+    mapped_emotions: dict[str, float] = Field(default_factory=dict)
     attention_disclaimer: str
 
 
@@ -103,6 +109,11 @@ class ConfidenceAndUncertaintyOut(BaseModel):
     confidence: float
     uncertainty: float
     mc_dropout_variance: float
+    # Optional/defaulted for the same reason as ModelEvidenceOut's
+    # rule_safety_score/emotion_component_score above: older persisted
+    # evidence_json predates these keys.
+    operable_risk_score: float | None = None
+    operable_risk_level: str | None = None
 
 
 class ExplainabilityOut(BaseModel):
@@ -136,10 +147,19 @@ class DecisionOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CaseMessageOut(BaseModel):
+    message_sequence: int
+    speaker_local_id: str
+    redacted_content: str | None
+
+    model_config = {"from_attributes": True}
+
+
 class CaseDetailResponse(BaseModel):
     case: CaseSummary
     results: list[ResultOut]
     decisions: list[DecisionOut]
+    messages: list[CaseMessageOut]
 
 
 class DecisionSubmitRequest(BaseModel):
