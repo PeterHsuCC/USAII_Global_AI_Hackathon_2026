@@ -10,7 +10,7 @@ import string
 from dataclasses import dataclass
 from datetime import datetime
 
-from backend.preprocessing.pii_redaction import redact_text
+from backend.preprocessing.pii_redaction import PII_REDACTION_SCOPE_LIMITATION, ner_is_available, redact_text
 
 _ALPHABET = string.ascii_uppercase
 
@@ -52,9 +52,11 @@ def _local_speaker_id(index: int) -> str:
 
 def prepare_conversation(raw_messages: list[RawMessage]) -> PreparationResult:
     if not raw_messages:
-        return PreparationResult(messages=(), data_limitations=("empty_conversation",))
+        return PreparationResult(
+            messages=(), data_limitations=(PII_REDACTION_SCOPE_LIMITATION, "empty_conversation")
+        )
 
-    limitations: list[str] = []
+    limitations: list[str] = [PII_REDACTION_SCOPE_LIMITATION]
 
     has_timestamps = all(m.timestamp is not None for m in raw_messages)
     if has_timestamps:
@@ -88,5 +90,12 @@ def prepare_conversation(raw_messages: list[RawMessage]) -> PreparationResult:
 
     if len(speaker_map) < 2:
         limitations.append("single_speaker_conversation")
+
+    # redact_text() above always attempts to load the NER model on first
+    # use, so by this point ner_is_available() reflects whether that attempt
+    # actually succeeded for this run -- if not, this case's names/places
+    # got regex-only coverage, which must be visible, not a silent fallback.
+    if not ner_is_available():
+        limitations.append("name_and_place_redaction_unavailable_this_run_regex_only_was_applied")
 
     return PreparationResult(messages=tuple(prepared), data_limitations=tuple(limitations))
