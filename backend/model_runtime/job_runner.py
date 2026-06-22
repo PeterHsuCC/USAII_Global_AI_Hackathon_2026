@@ -117,9 +117,11 @@ def _message_exceeds_encoder_budget(window: ConversationWindow, message_encoder)
 
 
 def _merge_safety_features(outcomes: list[_WindowOutcome]) -> SafetyFeatures:
-    """LLM signals: max per dimension across windows (display-only -- Lt
-    feeds no production score, Section 19.5 -- so the strongest signal seen
-    anywhere in the case is the most informative single number to show).
+    """LLM signals: max per dimension across windows -- this merged vector
+    only feeds the case-level Triggered Signals display; the per-window
+    human_review_required LLM-signal override (Section 13, Section 19.5)
+    is evaluated on each window's own (unmerged) L_t before this merge
+    runs, then OR'd across windows below, same as the rule-based terms.
     Rule signals: OR per rule across windows (a rule firing anywhere in the
     case should count, matching human_review_required's OR below)."""
     llm = [o.safety_features.llm_signals for o in outcomes]

@@ -11,7 +11,7 @@ import uuid
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from backend.db.models import AuditLog, Case, User
+from backend.db.models import AuditLog, Case, CaseMessage, User
 
 
 def get_case_for_org(
@@ -45,6 +45,16 @@ def list_cases_for_org(
     if priority is not None:
         stmt = stmt.where(Case.priority == priority)
     stmt = stmt.order_by(Case.created_at.desc())
+    return list(session.execute(stmt).scalars().all())
+
+
+def list_messages_for_case(session: Session, case_id: uuid.UUID) -> list[CaseMessage]:
+    """No separate organization_id check here -- the caller is expected to
+    have already resolved `case_id` via get_case_for_org (or an equivalent
+    org-scoped lookup) earlier in the same request, the same way
+    case.results/case.decisions are read off an already-validated case
+    without re-checking org on each row."""
+    stmt = select(CaseMessage).where(CaseMessage.case_id == case_id).order_by(CaseMessage.message_sequence)
     return list(session.execute(stmt).scalars().all())
 
 

@@ -47,9 +47,9 @@ LIMITATIONS = (
     "illustrative: EmotionScoreHead and RiskFusion have not yet been trained "
     "or calibrated. The Grooming Head is only as good as whatever weights it "
     "was constructed with -- untrained/random unless the caller explicitly "
-    "wired in a trained checkpoint (Section 19.5). Only the rule-based human "
-    "review condition and the persistence-based early warning below are "
-    "currently operable.",
+    "wired in a trained checkpoint (Section 19.5). Only the rule-based and "
+    "LLM-signal-based human review conditions and the persistence-based "
+    "early warning below are currently operable.",
     "All evidence must be interpreted by a human analyst.",
 )
 
@@ -269,6 +269,7 @@ class IntegratedInferencePipeline:
         review_flag = currently_operable_review(
             s_r_tilde=s_r_tilde,
             q_threat_phrase=features.rule_signals.threat_phrase,
+            llm_signal_max=max(features.llm_signals.to_vector()),
         )
         human_review_flag = bool(review_flag.item()) or warning_triggered
 

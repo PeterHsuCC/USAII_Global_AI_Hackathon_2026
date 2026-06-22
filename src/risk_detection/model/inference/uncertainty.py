@@ -8,6 +8,7 @@ DEFAULT_MC_DROPOUT_PASSES = 20
 DEFAULT_R_THRESHOLD = 0.7
 DEFAULT_CONFIDENCE_THRESHOLD = 0.6
 DEFAULT_RULE_THRESHOLD = 0.8
+DEFAULT_LLM_SIGNAL_THRESHOLD = 0.8
 
 
 def enable_mc_dropout(module: nn.Module) -> None:
@@ -115,18 +116,31 @@ def human_review_required(
 def currently_operable_review(
     s_r_tilde: torch.Tensor | float,
     q_threat_phrase: torch.Tensor | bool = False,
+    llm_signal_max: torch.Tensor | float = 0.0,
     rule_threshold: float = DEFAULT_RULE_THRESHOLD,
+    llm_signal_threshold: float = DEFAULT_LLM_SIGNAL_THRESHOLD,
 ) -> torch.Tensor:
     """Review_t (currently operable) = 1(S~_r(t) >= 0.8) v
-    1(Q_threat_phrase = 1) (Section 13, Section 19.5).
+    1(Q_threat_phrase = 1) v 1(max(L_t) >= 0.8) (Section 13, Section 19.5).
 
     The only portion of `human_review_required` that is meaningful for
     operational routing today: the rule-based terms have no learned
-    weights to wait on. R_hat_t, confidence, and Warning_t (Section 9.1)
-    all trace back to the untrained Grooming Head, EmotionScoreHead, and
-    RiskFusion, so they are deliberately excluded here rather than mixed
-    in with noise from framework-initialized weights.
+    weights to wait on, and L_t (the LLM safety-signal extractor's output)
+    is a per-window structured-output score, not a head trained on this
+    project's own (currently inaccurate) labels either. R_hat_t,
+    confidence, and Warning_t (Section 9.1) all trace back to the
+    untrained Grooming Head, EmotionScoreHead, and RiskFusion, so they
+    remain excluded here rather than mixed in with noise from
+    framework-initialized weights.
+
+    `llm_signal_max` mirrors the Q_threat_phrase override: a single L_t
+    dimension scored very high (e.g. an explicit threat or coercion
+    signal) should force review on its own rather than wait on
+    S~_r(t) >= 0.8, which the rule engine's narrower keyword/pattern list
+    can fail to reach even when the LLM extractor clearly flags the
+    conversation.
     """
     s_r_tilde = torch.as_tensor(s_r_tilde)
     q_threat_phrase = torch.as_tensor(q_threat_phrase, dtype=torch.bool)
-    return (s_r_tilde >= rule_threshold) | q_threat_phrase
+    llm_signal_max = torch.as_tensor(llm_signal_max)
+    return (s_r_tilde >= rule_threshold) | q_threat_phrase | (llm_signal_max >= llm_signal_threshold)

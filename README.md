@@ -32,8 +32,14 @@ Set `RISK_PLATFORM_API_URL` for the frontend if the backend isn't at `http://loc
 
 ### Model runtime modes
 
-- **`stub`** (default): tiny randomly-initialized encoders and zero-signal LLM/dependency extractors. No network access, fast, fully deterministic — this is also what the automated test suite uses.
-- **`real`**: loads `trained_weights/message_encoder.pt` + `cyberbullying_head.pt` for the cyberbullying signal and the Variant B `grooming_*_B.pt` checkpoint trio (its own dedicated message/conversation encoder pair, per `IntegratedInferencePipeline`'s `grooming_message_encoder`/`grooming_conversation_encoder` params) for the grooming signal, plus the real Claude-backed safety/dependency extractors (requires `ANTHROPIC_API_KEY`). Variant C (LLM-augmented) was never trained, since no `ANTHROPIC_API_KEY` was available at training time — see `backend/model_runtime/loader.py` for the full explanation. Enable with:
+- **`stub`** (default): tiny randomly-initialized encoders *and* randomly-initialized cyberbullying/grooming heads (neither is loaded from a checkpoint), plus zero-signal LLM/dependency extractors. No network access, fast, fully deterministic — this is also what the automated test suite uses. Component scores carry no real signal in this mode — found via a live test where escalating a conversation's final message to an explicit threat barely moved either score.
+- **`local`**: the same real `trained_weights/` checkpoints as `real` below (genuine cyberbullying/grooming/emotion-mapping scores), but the zero-signal LLM/dependency stand-ins instead of the Claude-backed ones — no `ANTHROPIC_API_KEY` needed, no per-case cost. Use this for UI/demo testing that needs real classifier behavior without burning LLM budget. Enable with:
+
+  ```bash
+  RISK_PLATFORM_MODEL_MODE=local uvicorn backend.main:app
+  ```
+
+- **`real`**: everything `local` loads, plus the real Claude-backed safety/dependency extractors (requires `ANTHROPIC_API_KEY`, real per-case cost). Variant C (LLM-augmented grooming) was never trained, since no `ANTHROPIC_API_KEY` was available at training time — see `backend/model_runtime/loader.py` for the full explanation. Enable with:
 
   ```bash
   RISK_PLATFORM_MODEL_MODE=real uvicorn backend.main:app

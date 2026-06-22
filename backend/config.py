@@ -58,8 +58,10 @@ class Settings:
     access_token_minutes: int = field(default_factory=lambda: _env_int("RISK_PLATFORM_ACCESS_TOKEN_MINUTES", 20))
     refresh_token_hours: int = field(default_factory=lambda: _env_int("RISK_PLATFORM_REFRESH_TOKEN_HOURS", 24))
 
-    # Model runtime mode: "stub" (fast, deterministic, offline; used by tests)
-    # or "real" (IntegratedInferencePipeline.from_pretrained() + trained_weights/).
+    # Model runtime mode: "stub" (fast, deterministic, offline; used by tests),
+    # "local" (real trained_weights/ checkpoints, zero-cost LLM stand-ins --
+    # no ANTHROPIC_API_KEY needed), or "real" (also calls the real,
+    # billed Claude-backed LLM/dependency extractors).
     model_runtime_mode: str = field(
         default_factory=lambda: os.environ.get("RISK_PLATFORM_MODEL_MODE", "stub")
     )

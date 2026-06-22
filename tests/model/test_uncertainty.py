@@ -137,6 +137,23 @@ def test_currently_operable_review(s_r_tilde, q_threat_phrase, expected):
 def test_currently_operable_review_ignores_score_and_confidence():
     # Demonstrates the Section 19.5 point directly: a sky-high R_hat_t (if
     # it were passed in, which this function doesn't even accept) cannot
-    # influence this decision -- only the rule-based terms can.
+    # influence this decision -- only the rule-based and LLM-signal terms can.
     decision = currently_operable_review(s_r_tilde=0.0, q_threat_phrase=False)
     assert bool(decision.item()) is False
+
+
+@pytest.mark.parametrize(
+    "llm_signal_max, expected",
+    [
+        (0.8, True),  # LLM signal at threshold
+        (0.92, True),  # comfortably above threshold (e.g. an explicit threat score)
+        (0.79, False),  # just below the non-inclusive boundary
+        (0.0, False),  # no LLM signal
+    ],
+)
+def test_currently_operable_review_llm_signal_override(llm_signal_max, expected):
+    # All other signals comfortably below threshold -- only the single
+    # high-confidence LLM signal should force review, mirroring
+    # q_threat_phrase's single-rule override.
+    decision = currently_operable_review(s_r_tilde=0.0, q_threat_phrase=False, llm_signal_max=llm_signal_max)
+    assert bool(decision.item()) is expected
